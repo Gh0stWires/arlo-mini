@@ -10,6 +10,7 @@
 #include <SD.h>
 #include "unihiker_k10.h"
 #include "asr.h"
+#include "face_animation.h"
 #include "secrets.h"
 
 #ifndef WIFI_FORCE_BSSID
@@ -47,10 +48,13 @@ Music music;
 ASR asr;
 
 constexpr uint32_t INK = 0x07111B;
-constexpr uint32_t CYAN = 0x37E6E9;
-constexpr uint32_t DIM = 0x155866;
-constexpr uint32_t WHITE = 0xDCFDFD;
-constexpr uint32_t AMBER = 0xFFB94D;
+constexpr uint32_t OUTLINE = 0x2A1723;
+constexpr uint32_t FACE_AMBER = 0xF6A63A;
+constexpr uint32_t FACE_GOLD = 0xFFD36B;
+constexpr uint32_t FACE_ERROR = 0xE9783D;
+constexpr uint32_t EYE_CREAM = 0xFFF1C7;
+constexpr uint32_t MOUTH_WINE = 0x5B1E2A;
+constexpr uint32_t WHITE = 0xFFF8E8;
 constexpr uint8_t RECORD_SECONDS = 5;
 constexpr int MAX_FOLLOWUPS = 2;
 constexpr size_t MIN_WAV_BYTES = 1000;
@@ -67,83 +71,163 @@ bool displayReady = false;
 bool wasAwake = false;
 String renderedState;
 String renderedCaption;
-bool renderedBlink = false;
-bool renderedMouthOpen = false;
+arloface::FaceModel renderedModel;
 bool renderedFace = false;
 unsigned long lastWiFiAttempt = 0;
 unsigned long lastRedraw = 0;
 unsigned long lastBlinked = 0;
 unsigned long wakeCooldownUntil = 0;
 
-uint32_t faceColor(const String &state) {
-    return state == "error" ? AMBER : CYAN;
+uint32_t faceFillColor(const String &state) {
+    if (state == "error") return FACE_ERROR;
+    if (state == "listening") return FACE_GOLD;
+    return FACE_AMBER;
 }
 
-void clearFaceRegion(int x, int y, int width, int height) {
-    k10.canvas->canvasRectangle(x, y, width, height, INK, INK, true);
+arloface::FaceState faceStateModel(const String &state) {
+    if (state == "listening") return arloface::FaceState::Listening;
+    if (state == "thinking") return arloface::FaceState::Thinking;
+    if (state == "speaking") return arloface::FaceState::Speaking;
+    if (state == "error") return arloface::FaceState::Error;
+    return arloface::FaceState::Idle;
 }
 
-void drawEyes(const String &state, bool blink) {
-    uint32_t color = faceColor(state);
-    if (blink) {
-        k10.canvas->canvasRectangle(35, 124, 70, 5, color, color, true);
-        k10.canvas->canvasRectangle(135, 124, 70, 5, color, color, true);
+arloface::Gaze faceGaze(const String &state) {
+    if (state == "thinking") return arloface::Gaze::Up;
+    if (state == "error") return arloface::Gaze::Left;
+    return arloface::Gaze::Center;
+}
+
+arloface::FaceModel makeFaceModel(const String &state, bool blink,
+                                  uint8_t mouthFrame) {
+    arloface::FaceModel model;
+    model.state = faceStateModel(state);
+    model.gaze = faceGaze(state);
+    model.blinkPhase = blink ? 1 : 0;
+    model.mouthFrame = mouthFrame;
+    return model;
+}
+
+void clearFaceRegion(int x, int y, int width, int height, uint32_t fill) {
+    k10.canvas->canvasRectangle(x, y, width, height, fill, fill, true);
+}
+
+void drawClockMotif() {
+    k10.canvas->canvasCircle(120, 78, 18, OUTLINE, OUTLINE, true);
+    k10.canvas->canvasCircle(120, 78, 13, FACE_GOLD, FACE_GOLD, true);
+    k10.canvas->canvasLine(120, 78, 120, 70, OUTLINE);
+    k10.canvas->canvasLine(120, 78, 127, 82, OUTLINE);
+    k10.canvas->canvasLine(120, 53, 120, 59, OUTLINE);
+    k10.canvas->canvasLine(120, 97, 120, 103, OUTLINE);
+    k10.canvas->canvasLine(95, 78, 101, 78, OUTLINE);
+    k10.canvas->canvasLine(139, 78, 145, 78, OUTLINE);
+}
+
+void drawStaticFace(const String &state) {
+    uint32_t fill = faceFillColor(state);
+    k10.canvas->canvasCircle(120, 158, 96, OUTLINE, OUTLINE, true);
+    k10.canvas->canvasCircle(120, 158, 89, fill, fill, true);
+    k10.canvas->canvasCircle(120, 158, 84, fill, fill, true);
+    drawClockMotif();
+    k10.canvas->canvasLine(42, 158, 49, 158, OUTLINE);
+    k10.canvas->canvasLine(191, 158, 198, 158, OUTLINE);
+    k10.canvas->canvasLine(61, 103, 66, 108, OUTLINE);
+    k10.canvas->canvasLine(174, 208, 179, 213, OUTLINE);
+}
+
+void drawEyes(const String &state, arloface::Gaze gaze, uint8_t blinkPhase) {
+    uint32_t fill = faceFillColor(state);
+    if (blinkPhase != 0) {
+        k10.canvas->canvasRectangle(47, 122, 56, 12, fill, fill, true);
+        k10.canvas->canvasRectangle(137, 122, 56, 12, fill, fill, true);
+        k10.canvas->canvasLine(49, 130, 101, 130, OUTLINE);
+        k10.canvas->canvasLine(139, 130, 191, 130, OUTLINE);
         return;
     }
-    int radius = state == "listening" ? 30 : 27;
-    int look = state == "thinking" ? 9 : 0;
-    k10.canvas->canvasCircle(75 + look, 124, radius, color, color, true);
-    k10.canvas->canvasCircle(165 + look, 124, radius, color, color, true);
-    k10.canvas->canvasCircle(79 + look, 120, 8, WHITE, WHITE, true);
-    k10.canvas->canvasCircle(169 + look, 120, 8, WHITE, WHITE, true);
+
+    int lookX = 0;
+    int lookY = 0;
+    if (gaze == arloface::Gaze::Left) lookX = -7;
+    if (gaze == arloface::Gaze::Right) lookX = 7;
+    if (gaze == arloface::Gaze::Up) lookY = -5;
+    int eyeRadius = state == "listening" ? 29 : 27;
+
+    for (int x : {75, 165}) {
+        k10.canvas->canvasCircle(x, 130, eyeRadius + 3, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(x, 130, eyeRadius, EYE_CREAM, EYE_CREAM, true);
+        k10.canvas->canvasCircle(x + lookX, 130 + lookY, 10, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(x + lookX - 3, 126 + lookY, 3, WHITE, WHITE, true);
+    }
+    k10.canvas->canvasLine(49, 101, 94, 97, OUTLINE);
+    k10.canvas->canvasLine(146, 97, 191, 101, OUTLINE);
 }
 
-void drawMouth(const String &state, bool mouthOpen) {
-    uint32_t color = faceColor(state);
-    if (mouthOpen) {
-        k10.canvas->canvasCircle(120, 213, 15, color, color, true);
+void drawMouth(const String &state, uint8_t mouthFrame) {
+    (void)state;
+    if (mouthFrame == 0) {
+        k10.canvas->canvasLine(101, 207, 111, 211, OUTLINE);
+        k10.canvas->canvasLine(111, 211, 120, 212, OUTLINE);
+        k10.canvas->canvasLine(120, 212, 129, 211, OUTLINE);
+        k10.canvas->canvasLine(129, 211, 139, 207, OUTLINE);
+    } else if (mouthFrame == 1) {
+        k10.canvas->canvasCircle(120, 207, 8, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(120, 207, 4, MOUTH_WINE, MOUTH_WINE, true);
+    } else if (mouthFrame == 2) {
+        k10.canvas->canvasCircle(120, 207, 15, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(120, 207, 10, MOUTH_WINE, MOUTH_WINE, true);
+        k10.canvas->canvasLine(112, 214, 128, 214, FACE_GOLD);
+    } else if (mouthFrame == 3) {
+        k10.canvas->canvasRectangle(99, 195, 42, 25, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasRectangle(105, 201, 30, 13, MOUTH_WINE, MOUTH_WINE, true);
+        k10.canvas->canvasLine(108, 215, 132, 215, FACE_GOLD);
     } else {
-        k10.canvas->canvasLine(103, 207, 137, 207, DIM);
+        k10.canvas->canvasCircle(120, 207, 12, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(120, 207, 7, MOUTH_WINE, MOUTH_WINE, true);
     }
 }
 
 void renderFullFace(const String &state, const String &caption,
-                    bool blink, bool mouthOpen) {
-    uint32_t color = faceColor(state);
+                    const arloface::FaceModel &model) {
+    uint32_t fill = faceFillColor(state);
     k10.canvas->canvasClear();
-    drawEyes(state, blink);
-    drawMouth(state, mouthOpen);
-    k10.canvas->canvasText("ARLO MINI", 57, 29, color,
+    drawStaticFace(state);
+    drawEyes(state, model.gaze, model.blinkPhase);
+    drawMouth(state, model.mouthFrame);
+    k10.canvas->canvasText("ARLO MINI", 57, 29, fill,
                           k10.canvas->eCNAndENFont16, 100, false);
     k10.canvas->canvasText(caption.substring(0, 23), 14, 275,
                           WHITE, k10.canvas->eCNAndENFont16, 210, false);
     renderedState = state;
     renderedCaption = caption;
-    renderedBlink = blink;
-    renderedMouthOpen = mouthOpen;
+    renderedModel = model;
     renderedFace = true;
 }
 
-void face(const String &state, const String &caption, bool blink = false, bool mouthOpen = false) {
+void face(const String &state, const String &caption, bool blink = false,
+          uint8_t mouthFrame = 0) {
     faceState = state;
     statusText = caption;
     if (!displayReady || !k10.canvas) return;
 
-    bool baseChanged = !renderedFace || renderedState != state || renderedCaption != caption;
-    if (baseChanged) {
-        renderFullFace(state, caption, blink, mouthOpen);
+    arloface::FaceModel next = makeFaceModel(state, blink, mouthFrame);
+    bool captionChanged = !renderedFace || renderedCaption != caption;
+    arloface::FaceDirtyRegion dirty = arloface::diff(
+        renderedModel, next, renderedFace, captionChanged);
+    if (dirty.full) {
+        renderFullFace(state, caption, next);
     } else {
-        if (renderedBlink != blink) {
-            clearFaceRegion(30, 82, 180, 86);
-            drawEyes(state, blink);
-            renderedBlink = blink;
+        uint32_t fill = faceFillColor(state);
+        if (dirty.eyes) {
+            clearFaceRegion(43, 93, 154, 78, fill);
+            drawEyes(state, next.gaze, next.blinkPhase);
         }
-        if (renderedMouthOpen != mouthOpen) {
-            clearFaceRegion(95, 190, 50, 50);
-            drawMouth(state, mouthOpen);
-            renderedMouthOpen = mouthOpen;
+        if (dirty.mouth) {
+            clearFaceRegion(94, 188, 52, 43, fill);
+            drawMouth(state, next.mouthFrame);
         }
+        renderedModel = next;
     }
+    if (!dirty.any()) return;
     digital_write(eLCD_BLK, 1);
     k10.canvas->updateCanvas();
     lastRedraw = millis();
@@ -233,7 +317,8 @@ String pollJob(const String &id) {
                     http.end();
                     return state;
                 }
-                face("thinking", state + "...", false, (frames++ % 2) == 0);
+                face("thinking", state + "...", false,
+                     static_cast<uint8_t>((frames++) % 4));
             }
         } else {
             Serial.printf("GET status -> %d\n", code);
@@ -352,16 +437,16 @@ void playback() {
     Serial.printf("Playback WAV duration=%lu ms minimum=%lu ms\n",
                   expectedMs, minimumPlaybackMs);
 
-    face("speaking", "ARLO speaking", false, true);
+    face("speaking", "ARLO speaking", false, 2);
     music.playTFCardAudio("S:/arlo-reply.wav");
 
     // Follow the SDK playback task, but also enforce the WAV duration. The SDK
     // can report idle early, and starting recording immediately would make the
     // next listening turn compete with the tail of the current response.
     unsigned long began = millis();
-    unsigned long nextMouthToggle = began + 300;
+    unsigned long nextMouthToggle = began + 260;
     bool started = false;
-    bool open = true;
+    uint8_t mouthFrame = 2;
     while (millis() - began < timeoutMs) {
         bool playing = k10.getPlayMusicState() != 0;
         if (playing) {
@@ -382,9 +467,9 @@ void playback() {
 
         unsigned long now = millis();
         if (now >= nextMouthToggle) {
-            open = !open;
-            face("speaking", "ARLO speaking", false, open);
-            nextMouthToggle += 300;
+            mouthFrame = static_cast<uint8_t>((mouthFrame + 1) % 5);
+            face("speaking", "ARLO speaking", false, mouthFrame);
+            nextMouthToggle += 260;
         }
         delay(35);
     }
