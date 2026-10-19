@@ -1,0 +1,34 @@
+# Python environments, caches, and test artifacts
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+*.py[cod]
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+bridge/.env
+firmware/include/secrets.h
+
+# PlatformIO and editor state
+.pio/
+**/.pio/
+.vscode/
+**/.vscode/
+
+# Local runtime output and captured audio
+*.wav
+*.log
+logs/
+recordings/
+
+# Hermes/Desktop working metadata
+.hermes/
+
+# OS metadata
+.DS_Store
+Thumbs.db
