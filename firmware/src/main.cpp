@@ -62,7 +62,7 @@ constexpr unsigned long JOB_TIMEOUT_MS = 250000;
 constexpr unsigned long RECONNECT_EVERY_MS = 8000;
 const char *INPUT_WAV = "/request.wav";
 const char *OUTPUT_WAV = "/arlo-reply.wav";
-constexpr uint16_t AUDIO_ENVELOPE_BINS = 512;
+constexpr uint16_t AUDIO_ENVELOPE_BINS = 1024;
 uint8_t audioEnvelope[AUDIO_ENVELOPE_BINS];
 uint32_t audioEnvelopeSum[AUDIO_ENVELOPE_BINS];
 uint16_t audioEnvelopeCount = 0;
@@ -235,9 +235,10 @@ void drawMouth(const String &state, uint8_t mouthFrame) {
         k10.canvas->canvasLine(128, 210, 136, 207, OUTLINE);
         k10.canvas->canvasLine(111, 209, 129, 209, MOUTH_WINE);
     } else if (mouthFrame == 2) {
-        k10.canvas->canvasCircle(120, 207, 15, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(120, 207, 10, MOUTH_WINE, MOUTH_WINE, true);
-        k10.canvas->canvasLine(112, 214, 128, 214, FACE_GOLD);
+        // A small open jaw gives the audio motion a second, distinct step.
+        k10.canvas->canvasCircle(120, 208, 9, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(120, 208, 5, MOUTH_WINE, MOUTH_WINE, true);
+        k10.canvas->canvasLine(113, 214, 127, 214, FACE_GOLD);
     } else if (mouthFrame == 3) {
         k10.canvas->canvasRectangle(99, 195, 42, 25, OUTLINE, OUTLINE, true);
         k10.canvas->canvasRectangle(105, 201, 30, 13, MOUTH_WINE, MOUTH_WINE, true);
@@ -574,6 +575,13 @@ uint8_t mouthFrameFromAmplitude(uint8_t amplitude) {
     return 4;
 }
 
+uint8_t mouthFrameFromAudio(uint8_t amplitude, uint8_t previousAmplitude) {
+    uint8_t frame = mouthFrameFromAmplitude(amplitude);
+    if (amplitude > previousAmplitude + 5 && frame < 4) ++frame;
+    if (previousAmplitude > amplitude + 5 && frame > 0) --frame;
+    return frame;
+}
+
 void settleMouthAfterPlayback(uint8_t mouthFrame) {
     if (mouthFrame >= 3) {
         face("speaking", "ARLO speaking", false, 2);
@@ -639,7 +647,11 @@ void playback() {
                     audioEnvelopeCount - 1,
                     (static_cast<uint64_t>(audioElapsed) * audioEnvelopeCount) /
                     expectedMs));
-                nextFrame = mouthFrameFromAmplitude(audioEnvelope[index]);
+                uint8_t previousAmplitude = index > 0
+                    ? audioEnvelope[index - 1]
+                    : audioEnvelope[index];
+                nextFrame = mouthFrameFromAudio(audioEnvelope[index],
+                                                 previousAmplitude);
             } else if (started && !envelopeReady) {
                 nextFrame = static_cast<uint8_t>(((now - audioStartedAt) / 260UL) % 5);
             }
@@ -647,7 +659,7 @@ void playback() {
             // This call also advances the speaking gaze every 900 ms, even
             // when the audio envelope stays in the same mouth band.
             face("speaking", "ARLO speaking", false, mouthFrame);
-            nextMouthUpdate = now + 80;
+            nextMouthUpdate = now + 45;
         }
         delay(25);
     }
