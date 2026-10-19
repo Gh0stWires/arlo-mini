@@ -37,6 +37,21 @@ TTS_BACKEND = os.getenv('TTS_BACKEND', 'auto').lower()
 MOCK_HERMES = os.getenv('MOCK_HERMES', 'false').lower() == 'true'
 MAX_UPLOAD = 2_000_000  # enough for a few seconds of PCM WAV
 JOB_TTL = 20 * 60
+EXIT_PHRASES = frozenset({
+    'stop',
+    'goodbye',
+    'talk to you later',
+    'never mind',
+    "that's all",
+})
+
+
+def is_conversation_end_phrase(text: str) -> bool:
+    """Return True only for a standalone, normalized exit phrase."""
+    normalized = re.sub(r"[^a-z0-9']+", ' ', text.lower()).strip()
+    normalized = re.sub(r'\s+', ' ', normalized)
+    return normalized in EXIT_PHRASES
+
 
 # No audio files are retained permanently; each job has its own temp directory.
 @dataclass
@@ -75,7 +90,8 @@ def cleanup_jobs():
     now = time.time()
     with jobs_lock:
         expired = [jid for jid, job in jobs.items()
-                   if now - job.created > JOB_TTL and job.state in ('ready', 'no_speech', 'error')]
+                   if now - job.created > JOB_TTL and job.state in (
+                       'ready', 'no_speech', 'conversation_end', 'error')]
         for jid in expired:
             jobs.pop(jid).directory.cleanup()
 
@@ -216,6 +232,9 @@ def run_job(jid: str, input_path: Path) -> None:
             if not text:
                 job.state = 'no_speech'
                 return
+            if is_conversation_end_phrase(text):
+                job.state = 'conversation_end'
+                return
             job.state = 'thinking'
             answer = ask_hermes(text)
             job.answer = answer
@@ -242,7 +261,9 @@ async def start_turn(request: Request, background_tasks: BackgroundTasks,
     require_key(x_device_key)
     cleanup_jobs()
     with jobs_lock:
-        busy = any(j.state not in ('ready', 'no_speech', 'error') for j in jobs.values())
+        busy = any(j.state not in (
+            'ready', 'no_speech', 'conversation_end', 'error')
+                   for j in jobs.values())
     if busy:
         raise HTTPException(409, 'Bridge is busy')
     # Stream read with strict byte limit; reject oversized uploads before creating a job.

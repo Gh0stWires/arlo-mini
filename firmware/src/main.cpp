@@ -392,7 +392,7 @@ String pollJob(const String &id) {
             String response = http.getString();
             if (deserializeJson(doc, response) == DeserializationError::Ok) {
                 String state = doc["state"].as<String>();
-                if (state == "ready" || state == "no_speech" || state == "error") {
+                if (state == "ready" || state == "no_speech" || state == "conversation_end" || state == "error") {
                     if (state == "error") Serial.println(doc["error"].as<String>());
                     http.end();
                     return state;
@@ -690,6 +690,10 @@ void voiceTurn(bool followup) {
         return;
     }
     String outcome = pollJob(job);
+    if (outcome == "conversation_end") {
+        face("idle", "Talk to you later");
+        return;
+    }
     if (outcome == "no_speech") {
         face("idle", "Say Jarvis to talk");
         return;

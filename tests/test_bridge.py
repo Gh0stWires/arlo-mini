@@ -47,6 +47,33 @@ def test_silence_returns_no_speech(monkeypatch):
     assert status['state'] == 'no_speech'
 
 
+def test_talk_to_you_later_ends_conversation_without_hermes(monkeypatch):
+    monkeypatch.setattr(server, 'speech_to_text', lambda p: 'Talk to you later!')
+    called = False
+
+    def fail_if_called(text):
+        nonlocal called
+        called = True
+        raise AssertionError('exit phrase must not reach Hermes')
+
+    monkeypatch.setattr(server, 'ask_hermes', fail_if_called)
+    response = client.post('/turn', headers=KEY, content=make_wav())
+    assert response.status_code == 202
+    jid = response.json()['id']
+    status = client.get(f'/jobs/{jid}', headers=KEY).json()
+    assert status['state'] == 'conversation_end'
+    assert status['transcript'] == 'Talk to you later!'
+    assert called is False
+    assert client.get(f'/jobs/{jid}/audio', headers=KEY).status_code == 409
+
+
+def test_exit_phrase_matching_is_conservative():
+    assert server.is_conversation_end_phrase('talk to you later') is True
+    assert server.is_conversation_end_phrase('Talk to you later!') is True
+    assert server.is_conversation_end_phrase('I want to talk to you later about this') is False
+    assert server.is_conversation_end_phrase('talk to you later about the project') is False
+
+
 def test_full_turn_and_audio_download(monkeypatch):
     monkeypatch.setattr(server, 'speech_to_text', lambda p: 'What is your name?')
 
