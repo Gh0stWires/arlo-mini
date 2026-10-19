@@ -62,6 +62,10 @@ constexpr unsigned long JOB_TIMEOUT_MS = 250000;
 constexpr unsigned long RECONNECT_EVERY_MS = 8000;
 const char *INPUT_WAV = "/request.wav";
 const char *OUTPUT_WAV = "/arlo-reply.wav";
+constexpr uint16_t AUDIO_ENVELOPE_BINS = 512;
+uint8_t audioEnvelope[AUDIO_ENVELOPE_BINS];
+uint32_t audioEnvelopeSum[AUDIO_ENVELOPE_BINS];
+uint16_t audioEnvelopeCount = 0;
 
 String statusText = "STARTING";
 String faceState = "idle";
@@ -101,6 +105,14 @@ arloface::Gaze faceGaze(const String &state, uint8_t animationFrame) {
             default: return arloface::Gaze::Center;
         }
     }
+    if (state == "speaking") {
+        switch (animationFrame % 6) {
+            case 1: return arloface::Gaze::Right;
+            case 3: return arloface::Gaze::Left;
+            case 4: return arloface::Gaze::Up;
+            default: return arloface::Gaze::Center;
+        }
+    }
     if (state == "error") return arloface::Gaze::Left;
     return arloface::Gaze::Center;
 }
@@ -108,7 +120,7 @@ arloface::Gaze faceGaze(const String &state, uint8_t animationFrame) {
 uint8_t thinkingMouthFrame(uint8_t animationFrame) {
     switch (animationFrame % 4) {
         case 0: return 5;  // slight curl
-        case 1: return 6;  // lower-lip bite
+        case 1: return 0;  // relax
         case 2: return 5;
         default: return 0;
     }
@@ -116,9 +128,12 @@ uint8_t thinkingMouthFrame(uint8_t animationFrame) {
 
 arloface::FaceModel makeFaceModel(const String &state, bool blink,
                                   uint8_t mouthFrame) {
-    uint8_t animationFrame = state == "thinking"
-        ? static_cast<uint8_t>((millis() / 650UL) % 4)
-        : 0;
+    uint8_t animationFrame = 0;
+    if (state == "thinking") {
+        animationFrame = static_cast<uint8_t>((millis() / 650UL) % 4);
+    } else if (state == "speaking") {
+        animationFrame = static_cast<uint8_t>((millis() / 900UL) % 6);
+    }
     arloface::FaceModel model;
     model.state = faceStateModel(state);
     model.gaze = faceGaze(state, animationFrame);
@@ -231,11 +246,6 @@ void drawMouth(const String &state, uint8_t mouthFrame) {
         k10.canvas->canvasLine(103, 210, 112, 207, OUTLINE);
         k10.canvas->canvasLine(112, 207, 121, 211, OUTLINE);
         k10.canvas->canvasLine(121, 211, 137, 205, OUTLINE);
-    } else if (mouthFrame == 6) {
-        // The gold lower lip crossing the dark mouth suggests a gentle bite.
-        k10.canvas->canvasCircle(120, 208, 10, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(120, 211, 6, MOUTH_WINE, MOUTH_WINE, true);
-        k10.canvas->canvasLine(109, 203, 131, 203, FACE_GOLD);
     } else {
         k10.canvas->canvasCircle(120, 207, 12, OUTLINE, OUTLINE, true);
         k10.canvas->canvasCircle(120, 207, 7, MOUTH_WINE, MOUTH_WINE, true);
@@ -486,6 +496,80 @@ unsigned long outputWavDurationMs() {
     return (unsigned long)(((bytes - 44ULL) * 1000ULL) / byteRate);
 }
 
+bool buildAudioEnvelope() {
+    audioEnvelopeCount = 0;
+    File f = SD.open(OUTPUT_WAV, FILE_READ);
+    if (!f) return false;
+    size_t bytes = f.size();
+    if (bytes <= 44) {
+        f.close();
+        return false;
+    }
+
+    uint32_t totalFrames = static_cast<uint32_t>((bytes - 44) / 4);
+    if (totalFrames == 0) {
+        f.close();
+        return false;
+    }
+    for (uint16_t i = 0; i < AUDIO_ENVELOPE_BINS; ++i) {
+        audioEnvelopeSum[i] = 0;
+        audioEnvelope[i] = 0;
+    }
+
+    f.seek(44);
+    uint8_t buffer[4096];
+    uint32_t frameIndex = 0;
+    while (frameIndex < totalFrames) {
+        size_t got = f.read(buffer, sizeof(buffer));
+        if (got < 4) break;
+        size_t usable = got - (got % 4);
+        for (size_t offset = 0; offset < usable && frameIndex < totalFrames;
+             offset += 4, ++frameIndex) {
+            int32_t left = static_cast<int16_t>(
+                static_cast<uint16_t>(buffer[offset]) |
+                (static_cast<uint16_t>(buffer[offset + 1]) << 8));
+            int32_t right = static_cast<int16_t>(
+                static_cast<uint16_t>(buffer[offset + 2]) |
+                (static_cast<uint16_t>(buffer[offset + 3]) << 8));
+            if (left < 0) left = -left;
+            if (right < 0) right = -right;
+            uint16_t level = static_cast<uint16_t>((left + right) / 2);
+            uint16_t bin = static_cast<uint16_t>(
+                (static_cast<uint64_t>(frameIndex) * AUDIO_ENVELOPE_BINS) /
+                totalFrames);
+            if (bin >= AUDIO_ENVELOPE_BINS) bin = AUDIO_ENVELOPE_BINS - 1;
+            audioEnvelopeSum[bin] += level;
+        }
+    }
+    f.close();
+
+    if (frameIndex == 0) return false;
+    audioEnvelopeCount = static_cast<uint16_t>(
+        min<uint32_t>(AUDIO_ENVELOPE_BINS,
+                      (static_cast<uint64_t>(frameIndex) * AUDIO_ENVELOPE_BINS) /
+                      totalFrames));
+    if (audioEnvelopeCount == 0) audioEnvelopeCount = 1;
+    for (uint16_t i = 0; i < audioEnvelopeCount; ++i) {
+        uint32_t start = (static_cast<uint64_t>(i) * totalFrames) /
+                         AUDIO_ENVELOPE_BINS;
+        uint32_t end = (static_cast<uint64_t>(i + 1) * totalFrames) /
+                       AUDIO_ENVELOPE_BINS;
+        uint32_t framesInBin = max<uint32_t>(1, end - start);
+        uint32_t average = audioEnvelopeSum[i] / framesInBin;
+        audioEnvelope[i] = static_cast<uint8_t>(min<uint32_t>(
+            255, (average * 255U) / 32767U));
+    }
+    return frameIndex == totalFrames;
+}
+
+uint8_t mouthFrameFromAmplitude(uint8_t amplitude) {
+    if (amplitude < 4) return 0;
+    if (amplitude < 24) return 1;
+    if (amplitude < 82) return 2;
+    if (amplitude < 170) return 3;
+    return 4;
+}
+
 void playback() {
     if (!SD.exists(OUTPUT_WAV)) return;
     unsigned long expectedMs = outputWavDurationMs();
@@ -493,21 +577,25 @@ void playback() {
     unsigned long timeoutMs = max(minimumPlaybackMs + 15000UL, 30000UL);
     Serial.printf("Playback WAV duration=%lu ms minimum=%lu ms\n",
                   expectedMs, minimumPlaybackMs);
-
-    face("speaking", "ARLO speaking", false, 2);
+    bool envelopeReady = buildAudioEnvelope();
+    Serial.printf("Audio envelope bins=%u ready=%d\n",
+                  audioEnvelopeCount, envelopeReady ? 1 : 0);
+    face("speaking", "ARLO speaking", false, 0);
     music.playTFCardAudio("S:/arlo-reply.wav");
 
     // Follow the SDK playback task, but also enforce the WAV duration. The SDK
     // can report idle early, and starting recording immediately would make the
     // next listening turn compete with the tail of the current response.
     unsigned long began = millis();
-    unsigned long nextMouthToggle = began + 260;
+    unsigned long nextMouthUpdate = began;
+    unsigned long audioStartedAt = began;
     bool started = false;
-    uint8_t mouthFrame = 2;
+    uint8_t mouthFrame = 0;
     while (millis() - began < timeoutMs) {
         bool playing = k10.getPlayMusicState() != 0;
-        if (playing) {
+        if (playing && !started) {
             started = true;
+            audioStartedAt = millis();
         }
 
         unsigned long elapsed = millis() - began;
@@ -523,12 +611,26 @@ void playback() {
         }
 
         unsigned long now = millis();
-        if (now >= nextMouthToggle) {
-            mouthFrame = static_cast<uint8_t>((mouthFrame + 1) % 5);
+        if (now >= nextMouthUpdate) {
+            uint8_t nextFrame = 0;
+            if (started && expectedMs > 0 && envelopeReady &&
+                audioEnvelopeCount > 0) {
+                unsigned long audioElapsed = now - audioStartedAt;
+                uint16_t index = static_cast<uint16_t>(min<uint64_t>(
+                    audioEnvelopeCount - 1,
+                    (static_cast<uint64_t>(audioElapsed) * audioEnvelopeCount) /
+                    expectedMs));
+                nextFrame = mouthFrameFromAmplitude(audioEnvelope[index]);
+            } else if (started && !envelopeReady) {
+                nextFrame = static_cast<uint8_t>(((now - audioStartedAt) / 260UL) % 5);
+            }
+            mouthFrame = nextFrame;
+            // This call also advances the speaking gaze every 900 ms, even
+            // when the audio envelope stays in the same mouth band.
             face("speaking", "ARLO speaking", false, mouthFrame);
-            nextMouthToggle += 260;
+            nextMouthUpdate = now + 80;
         }
-        delay(35);
+        delay(25);
     }
     if (millis() - began >= timeoutMs && k10.getPlayMusicState() != 0) {
         Serial.println("Playback timeout; stopping stuck audio task");
