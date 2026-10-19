@@ -92,19 +92,40 @@ arloface::FaceState faceStateModel(const String &state) {
     return arloface::FaceState::Idle;
 }
 
-arloface::Gaze faceGaze(const String &state) {
-    if (state == "thinking") return arloface::Gaze::Up;
+arloface::Gaze faceGaze(const String &state, uint8_t animationFrame) {
+    if (state == "thinking") {
+        switch (animationFrame % 4) {
+            case 0: return arloface::Gaze::Up;
+            case 1: return arloface::Gaze::Left;
+            case 2: return arloface::Gaze::Right;
+            default: return arloface::Gaze::Center;
+        }
+    }
     if (state == "error") return arloface::Gaze::Left;
     return arloface::Gaze::Center;
 }
 
+uint8_t thinkingMouthFrame(uint8_t animationFrame) {
+    switch (animationFrame % 4) {
+        case 0: return 5;  // slight curl
+        case 1: return 6;  // lower-lip bite
+        case 2: return 5;
+        default: return 0;
+    }
+}
+
 arloface::FaceModel makeFaceModel(const String &state, bool blink,
                                   uint8_t mouthFrame) {
+    uint8_t animationFrame = state == "thinking"
+        ? static_cast<uint8_t>((millis() / 650UL) % 4)
+        : 0;
     arloface::FaceModel model;
     model.state = faceStateModel(state);
-    model.gaze = faceGaze(state);
+    model.gaze = faceGaze(state, animationFrame);
     model.blinkPhase = blink ? 1 : 0;
-    model.mouthFrame = mouthFrame;
+    model.mouthFrame = (state == "thinking" && mouthFrame == 0)
+        ? thinkingMouthFrame(animationFrame)
+        : mouthFrame;
     return model;
 }
 
@@ -169,8 +190,9 @@ void drawEyes(const String &state, arloface::Gaze gaze, uint8_t blinkPhase) {
         k10.canvas->canvasCircle(x + lookX - 3, 126 + lookY, 3, WHITE, WHITE, true);
     }
     if (state == "thinking") {
-        k10.canvas->canvasLine(49, 98, 94, 105, OUTLINE);
-        k10.canvas->canvasLine(146, 105, 191, 98, OUTLINE);
+        // Raised, slightly uneven brows read as concentration rather than anger.
+        k10.canvas->canvasLine(49, 101, 94, 96, OUTLINE);
+        k10.canvas->canvasLine(146, 96, 191, 101, OUTLINE);
     } else {
         k10.canvas->canvasLine(49, 101, 94, 97, OUTLINE);
         k10.canvas->canvasLine(146, 97, 191, 101, OUTLINE);
@@ -201,6 +223,19 @@ void drawMouth(const String &state, uint8_t mouthFrame) {
         k10.canvas->canvasRectangle(99, 195, 42, 25, OUTLINE, OUTLINE, true);
         k10.canvas->canvasRectangle(105, 201, 30, 13, MOUTH_WINE, MOUTH_WINE, true);
         k10.canvas->canvasLine(108, 215, 132, 215, FACE_GOLD);
+    } else if (mouthFrame == 4) {
+        k10.canvas->canvasCircle(120, 207, 12, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(120, 207, 7, MOUTH_WINE, MOUTH_WINE, true);
+    } else if (mouthFrame == 5) {
+        // A small asymmetric curl for a concentrated, thinking expression.
+        k10.canvas->canvasLine(103, 210, 112, 207, OUTLINE);
+        k10.canvas->canvasLine(112, 207, 121, 211, OUTLINE);
+        k10.canvas->canvasLine(121, 211, 137, 205, OUTLINE);
+    } else if (mouthFrame == 6) {
+        // The gold lower lip crossing the dark mouth suggests a gentle bite.
+        k10.canvas->canvasCircle(120, 208, 10, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(120, 211, 6, MOUTH_WINE, MOUTH_WINE, true);
+        k10.canvas->canvasLine(109, 203, 131, 203, FACE_GOLD);
     } else {
         k10.canvas->canvasCircle(120, 207, 12, OUTLINE, OUTLINE, true);
         k10.canvas->canvasCircle(120, 207, 7, MOUTH_WINE, MOUTH_WINE, true);
