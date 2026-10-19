@@ -228,8 +228,12 @@ void drawMouth(const String &state, uint8_t mouthFrame) {
         k10.canvas->canvasLine(120, 212, 129, 211, OUTLINE);
         k10.canvas->canvasLine(129, 211, 139, 207, OUTLINE);
     } else if (mouthFrame == 1) {
-        k10.canvas->canvasCircle(120, 207, 8, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(120, 207, 4, MOUTH_WINE, MOUTH_WINE, true);
+        // A shallow open smile bridges naturally from the resting smile.
+        k10.canvas->canvasLine(104, 207, 112, 210, OUTLINE);
+        k10.canvas->canvasLine(112, 210, 120, 211, OUTLINE);
+        k10.canvas->canvasLine(120, 211, 128, 210, OUTLINE);
+        k10.canvas->canvasLine(128, 210, 136, 207, OUTLINE);
+        k10.canvas->canvasLine(111, 209, 129, 209, MOUTH_WINE);
     } else if (mouthFrame == 2) {
         k10.canvas->canvasCircle(120, 207, 15, OUTLINE, OUTLINE, true);
         k10.canvas->canvasCircle(120, 207, 10, MOUTH_WINE, MOUTH_WINE, true);
@@ -570,6 +574,21 @@ uint8_t mouthFrameFromAmplitude(uint8_t amplitude) {
     return 4;
 }
 
+void settleMouthAfterPlayback(uint8_t mouthFrame) {
+    if (mouthFrame >= 3) {
+        face("speaking", "ARLO speaking", false, 2);
+        delay(35);
+    }
+    if (mouthFrame >= 1) {
+        face("speaking", "ARLO speaking", false, 1);
+        delay(35);
+    }
+    if (mouthFrame != 0) {
+        face("speaking", "ARLO speaking", false, 0);
+        delay(45);
+    }
+}
+
 void playback() {
     if (!SD.exists(OUTPUT_WAV)) return;
     unsigned long expectedMs = outputWavDurationMs();
@@ -636,6 +655,7 @@ void playback() {
         Serial.println("Playback timeout; stopping stuck audio task");
         music.stopPlayAudio();
     }
+    settleMouthAfterPlayback(mouthFrame);
 }
 
 void voiceTurn(bool followup) {

@@ -85,3 +85,5 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "buildAudioEnvelope" in source
     assert "mouthFrameFromAmplitude" in source
     assert "state == \"speaking\"" in source
+    assert "canvasCircle(120, 207, 8, OUTLINE" not in source
+    assert "settleMouthAfterPlayback" in source
