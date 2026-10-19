@@ -28,9 +28,9 @@ class FaceModel:
 
 
 def dirty_regions(previous, current, has_previous, caption_changed):
-    if not has_previous or caption_changed or previous.state != current.state:
+    if not has_previous or previous.state != current.state:
         return {"full"}
-    dirty = set()
+    dirty = {"caption"} if caption_changed else set()
     if (previous.gaze, previous.blink_phase) != (current.gaze, current.blink_phase):
         dirty.add("eyes")
     if previous.mouth_frame != current.mouth_frame:
@@ -46,8 +46,8 @@ def test_initial_or_state_change_requires_full_render():
     assert dirty_regions(old, FaceModel(state=State.THINKING), True, False) == {"full"}
 
 
-def test_caption_change_requires_full_static_render():
-    assert dirty_regions(FaceModel(), FaceModel(), True, True) == {"full"}
+def test_caption_change_invalidates_caption_region_only():
+    assert dirty_regions(FaceModel(), FaceModel(), True, True) == {"caption"}
 
 
 def test_blink_only_invalidates_eyes():
@@ -72,5 +72,7 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     source = (Path(__file__).resolve().parents[1] / "firmware" / "src" / "main.cpp").read_text()
     assert source.count("canvasClear();") == 1
     assert "if (!dirty.any()) return;" in source
-    assert "clearFaceRegion(43, 93, 154, 78, fill);" in source
+    assert "clearFaceRegion(43, 93, 154, 78, fill);" not in source
+    assert "clearEyeRegion(fill);" in source
     assert "clearFaceRegion(94, 188, 52, 43, fill);" in source
+    assert 'face("thinking", state + "...", false, 0);' in source

@@ -32,9 +32,10 @@ struct FaceDirtyRegion {
     bool eyes = false;
     bool mouth = false;
     bool accent = false;
+    bool caption = false;
 
     bool any() const {
-        return full || eyes || mouth || accent;
+        return full || eyes || mouth || accent || caption;
     }
 };
 

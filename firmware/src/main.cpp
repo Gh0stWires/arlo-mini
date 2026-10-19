@@ -112,15 +112,23 @@ void clearFaceRegion(int x, int y, int width, int height, uint32_t fill) {
     k10.canvas->canvasRectangle(x, y, width, height, fill, fill, true);
 }
 
-void drawClockMotif() {
-    k10.canvas->canvasCircle(120, 78, 18, OUTLINE, OUTLINE, true);
-    k10.canvas->canvasCircle(120, 78, 13, FACE_GOLD, FACE_GOLD, true);
-    k10.canvas->canvasLine(120, 78, 120, 70, OUTLINE);
-    k10.canvas->canvasLine(120, 78, 127, 82, OUTLINE);
-    k10.canvas->canvasLine(120, 53, 120, 59, OUTLINE);
-    k10.canvas->canvasLine(120, 97, 120, 103, OUTLINE);
-    k10.canvas->canvasLine(95, 78, 101, 78, OUTLINE);
-    k10.canvas->canvasLine(139, 78, 145, 78, OUTLINE);
+void drawClockTicks() {
+    const int starts[][2] = {
+        {120, 58}, {151, 65}, {176, 87}, {195, 116},
+        {201, 158}, {195, 200}, {176, 229}, {151, 251},
+        {120, 258}, {89, 251}, {64, 229}, {45, 200},
+        {39, 158}, {45, 116}, {64, 87}, {89, 65},
+    };
+    const int ends[][2] = {
+        {120, 67}, {148, 73}, {170, 93}, {187, 119},
+        {193, 158}, {187, 197}, {170, 223}, {148, 243},
+        {120, 249}, {92, 243}, {70, 223}, {53, 197},
+        {47, 158}, {53, 119}, {70, 93}, {92, 73},
+    };
+    for (uint8_t i = 0; i < 16; ++i) {
+        k10.canvas->canvasLine(starts[i][0], starts[i][1],
+                               ends[i][0], ends[i][1], OUTLINE);
+    }
 }
 
 void drawStaticFace(const String &state) {
@@ -128,18 +136,20 @@ void drawStaticFace(const String &state) {
     k10.canvas->canvasCircle(120, 158, 96, OUTLINE, OUTLINE, true);
     k10.canvas->canvasCircle(120, 158, 89, fill, fill, true);
     k10.canvas->canvasCircle(120, 158, 84, fill, fill, true);
-    drawClockMotif();
+    drawClockTicks();
     k10.canvas->canvasLine(42, 158, 49, 158, OUTLINE);
     k10.canvas->canvasLine(191, 158, 198, 158, OUTLINE);
     k10.canvas->canvasLine(61, 103, 66, 108, OUTLINE);
     k10.canvas->canvasLine(174, 208, 179, 213, OUTLINE);
 }
 
+void clearEyeRegion(uint32_t fill) {
+    k10.canvas->canvasCircle(75, 130, 31, fill, fill, true);
+    k10.canvas->canvasCircle(165, 130, 31, fill, fill, true);
+}
+
 void drawEyes(const String &state, arloface::Gaze gaze, uint8_t blinkPhase) {
-    uint32_t fill = faceFillColor(state);
     if (blinkPhase != 0) {
-        k10.canvas->canvasRectangle(47, 122, 56, 12, fill, fill, true);
-        k10.canvas->canvasRectangle(137, 122, 56, 12, fill, fill, true);
         k10.canvas->canvasLine(49, 130, 101, 130, OUTLINE);
         k10.canvas->canvasLine(139, 130, 191, 130, OUTLINE);
         return;
@@ -158,8 +168,19 @@ void drawEyes(const String &state, arloface::Gaze gaze, uint8_t blinkPhase) {
         k10.canvas->canvasCircle(x + lookX, 130 + lookY, 10, OUTLINE, OUTLINE, true);
         k10.canvas->canvasCircle(x + lookX - 3, 126 + lookY, 3, WHITE, WHITE, true);
     }
-    k10.canvas->canvasLine(49, 101, 94, 97, OUTLINE);
-    k10.canvas->canvasLine(146, 97, 191, 101, OUTLINE);
+    if (state == "thinking") {
+        k10.canvas->canvasLine(49, 98, 94, 105, OUTLINE);
+        k10.canvas->canvasLine(146, 105, 191, 98, OUTLINE);
+    } else {
+        k10.canvas->canvasLine(49, 101, 94, 97, OUTLINE);
+        k10.canvas->canvasLine(146, 97, 191, 101, OUTLINE);
+    }
+}
+
+void drawCaption(const String &caption) {
+    clearFaceRegion(10, 262, 220, 32, INK);
+    k10.canvas->canvasText(caption.substring(0, 23), 14, 275,
+                          WHITE, k10.canvas->eCNAndENFont16, 210, false);
 }
 
 void drawMouth(const String &state, uint8_t mouthFrame) {
@@ -195,8 +216,7 @@ void renderFullFace(const String &state, const String &caption,
     drawMouth(state, model.mouthFrame);
     k10.canvas->canvasText("ARLO MINI", 57, 29, fill,
                           k10.canvas->eCNAndENFont16, 100, false);
-    k10.canvas->canvasText(caption.substring(0, 23), 14, 275,
-                          WHITE, k10.canvas->eCNAndENFont16, 210, false);
+    drawCaption(caption);
     renderedState = state;
     renderedCaption = caption;
     renderedModel = model;
@@ -218,13 +238,17 @@ void face(const String &state, const String &caption, bool blink = false,
     } else {
         uint32_t fill = faceFillColor(state);
         if (dirty.eyes) {
-            clearFaceRegion(43, 93, 154, 78, fill);
+            clearEyeRegion(fill);
             drawEyes(state, next.gaze, next.blinkPhase);
         }
         if (dirty.mouth) {
             clearFaceRegion(94, 188, 52, 43, fill);
             drawMouth(state, next.mouthFrame);
         }
+        if (dirty.caption) {
+            drawCaption(caption);
+        }
+        renderedCaption = caption;
         renderedModel = next;
     }
     if (!dirty.any()) return;
@@ -299,7 +323,6 @@ String createJob() {
 // Polling lets us animate while Hermes/Whisper/TTS are running on the PC.
 String pollJob(const String &id) {
     unsigned long start = millis();
-    unsigned long frames = 0;
     while (millis() - start < JOB_TIMEOUT_MS) {
         if (WiFi.status() != WL_CONNECTED) return "error";
         HTTPClient http;
@@ -317,8 +340,7 @@ String pollJob(const String &id) {
                     http.end();
                     return state;
                 }
-                face("thinking", state + "...", false,
-                     static_cast<uint8_t>((frames++) % 4));
+                face("thinking", state + "...", false, 0);
             }
         } else {
             Serial.printf("GET status -> %d\n", code);
