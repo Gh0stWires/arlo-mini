@@ -47,8 +47,13 @@ def test_silence_returns_no_speech(monkeypatch):
     assert status['state'] == 'no_speech'
 
 
-def test_talk_to_you_later_ends_conversation_without_hermes(monkeypatch):
+def test_talk_to_you_later_ends_conversation_with_a_farewell(monkeypatch):
     monkeypatch.setattr(server, 'speech_to_text', lambda p: 'Talk to you later!')
+    monkeypatch.setattr(
+        server,
+        'speech_to_wav',
+        lambda text, out, directory: out.write_bytes(b'RIFF-farewell'),
+    )
     called = False
 
     def fail_if_called(text):
@@ -63,8 +68,11 @@ def test_talk_to_you_later_ends_conversation_without_hermes(monkeypatch):
     status = client.get(f'/jobs/{jid}', headers=KEY).json()
     assert status['state'] == 'conversation_end'
     assert status['transcript'] == 'Talk to you later!'
+    assert status['answer'] == 'Goodbye. Talk to you later!'
     assert called is False
-    assert client.get(f'/jobs/{jid}/audio', headers=KEY).status_code == 409
+    audio = client.get(f'/jobs/{jid}/audio', headers=KEY)
+    assert audio.status_code == 200
+    assert audio.content == b'RIFF-farewell'
 
 
 def test_exit_phrase_matching_is_conservative():

@@ -232,17 +232,17 @@ def run_job(jid: str, input_path: Path) -> None:
             if not text:
                 job.state = 'no_speech'
                 return
-            if is_conversation_end_phrase(text):
-                job.state = 'conversation_end'
-                return
-            job.state = 'thinking'
-            answer = ask_hermes(text)
-            job.answer = answer
+            end_conversation = is_conversation_end_phrase(text)
+            if end_conversation:
+                job.answer = 'Goodbye. Talk to you later!'
+            else:
+                job.state = 'thinking'
+                job.answer = ask_hermes(text)
             job.state = 'speaking'
             target = Path(job.directory.name) / 'reply.wav'
-            speech_to_wav(answer, target, Path(job.directory.name))
+            speech_to_wav(job.answer, target, Path(job.directory.name))
             job.audio_path = target
-            job.state = 'ready'
+            job.state = 'conversation_end' if end_conversation else 'ready'
     except Exception as exc:
         # Error detail deliberately exposed only to a client possessing the device key.
         job.error = f'{type(exc).__name__}: {str(exc)[:240]}'
@@ -292,7 +292,7 @@ def job_status(jid: str, x_device_key: Optional[str] = Header(default=None)):
     require_key(x_device_key)
     job = get_job(jid)
     return {'id': job.id, 'state': job.state, 'transcript': job.transcript,
-            'answer': job.answer if job.state == 'ready' else '',
+            'answer': job.answer if job.state in ('ready', 'conversation_end') else '',
             'error': job.error}
 
 
@@ -300,7 +300,7 @@ def job_status(jid: str, x_device_key: Optional[str] = Header(default=None)):
 def job_audio(jid: str, x_device_key: Optional[str] = Header(default=None)):
     require_key(x_device_key)
     job = get_job(jid)
-    if job.state != 'ready' or job.audio_path is None:
+    if job.state not in ('ready', 'conversation_end') or job.audio_path is None:
         raise HTTPException(409, 'Audio not ready')
     return FileResponse(job.audio_path, media_type='audio/wav', filename='reply.wav')
 

@@ -691,6 +691,13 @@ void voiceTurn(bool followup) {
     }
     String outcome = pollJob(job);
     if (outcome == "conversation_end") {
+        face("thinking", "Saying goodbye...");
+        if (!fetchAudio(job)) {
+            face("error", "Goodbye audio failed");
+            delay(2000);
+            return;
+        }
+        playback();
         face("idle", "Talk to you later");
         return;
     }
