@@ -3,6 +3,7 @@
 // Requires FAT32 microSD and bridge server running on local Wi-Fi.
 
 #include <Arduino.h>
+#include <math.h>
 #include <esp_system.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -149,21 +150,31 @@ void clearFaceRegion(int x, int y, int width, int height, uint32_t fill) {
 }
 
 void drawClockTicks() {
-    const int starts[][2] = {
-        {120, 58}, {151, 65}, {176, 87}, {195, 116},
-        {201, 158}, {195, 200}, {176, 229}, {151, 251},
-        {120, 258}, {89, 251}, {64, 229}, {45, 200},
-        {39, 158}, {45, 116}, {64, 87}, {89, 65},
-    };
-    const int ends[][2] = {
-        {120, 67}, {148, 73}, {170, 93}, {187, 119},
-        {193, 158}, {187, 197}, {170, 223}, {148, 243},
-        {120, 249}, {92, 243}, {70, 223}, {53, 197},
-        {47, 158}, {53, 119}, {70, 93}, {92, 73},
-    };
-    for (uint8_t i = 0; i < 16; ++i) {
-        k10.canvas->canvasLine(starts[i][0], starts[i][1],
-                               ends[i][0], ends[i][1], OUTLINE);
+    constexpr float DEGREES_TO_RADIANS = 0.01745329252f;
+    constexpr int CENTER_X = 120;
+    constexpr int CENTER_Y = 158;
+    constexpr int MINUTE_OUTER_RADIUS = 85;
+    constexpr int MINUTE_INNER_RADIUS = 81;
+    constexpr int HOUR_OUTER_RADIUS = 87;
+    constexpr int HOUR_INNER_RADIUS = 75;
+
+    for (uint8_t minute = 0; minute < 60; ++minute) {
+        bool hourMarker = minute % 5 == 0;
+        float angle = (static_cast<float>(minute) * 6.0f - 90.0f) *
+                      DEGREES_TO_RADIANS;
+        int outerRadius = hourMarker ? HOUR_OUTER_RADIUS
+                                     : MINUTE_OUTER_RADIUS;
+        int innerRadius = hourMarker ? HOUR_INNER_RADIUS
+                                     : MINUTE_INNER_RADIUS;
+        int outerX = static_cast<int>(lroundf(
+            CENTER_X + cosf(angle) * outerRadius));
+        int outerY = static_cast<int>(lroundf(
+            CENTER_Y + sinf(angle) * outerRadius));
+        int innerX = static_cast<int>(lroundf(
+            CENTER_X + cosf(angle) * innerRadius));
+        int innerY = static_cast<int>(lroundf(
+            CENTER_Y + sinf(angle) * innerRadius));
+        k10.canvas->canvasLine(outerX, outerY, innerX, innerY, OUTLINE);
     }
 }
 
@@ -173,10 +184,6 @@ void drawStaticFace(const String &state) {
     k10.canvas->canvasCircle(120, 158, 89, fill, fill, true);
     k10.canvas->canvasCircle(120, 158, 84, fill, fill, true);
     drawClockTicks();
-    k10.canvas->canvasLine(42, 158, 49, 158, OUTLINE);
-    k10.canvas->canvasLine(191, 158, 198, 158, OUTLINE);
-    k10.canvas->canvasLine(61, 103, 66, 108, OUTLINE);
-    k10.canvas->canvasLine(174, 208, 179, 213, OUTLINE);
 }
 
 void clearEyeRegion(uint32_t fill) {

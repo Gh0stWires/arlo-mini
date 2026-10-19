@@ -90,3 +90,6 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "state == \"speaking\"" in source
     assert "canvasCircle(120, 207, 8, OUTLINE" not in source
     assert "settleMouthAfterPlayback" in source
+    assert "for (uint8_t minute = 0; minute < 60; ++minute)" in source
+    assert "minute % 5 == 0" in source
+    assert "const int starts[][2]" not in source
