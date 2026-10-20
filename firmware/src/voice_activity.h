@@ -16,7 +16,7 @@ enum class CaptureDecision : uint8_t {
 struct VoiceActivityConfig {
     uint16_t frameMs = 20;
     uint16_t startFrames = 2;
-    uint16_t silenceHangoverMs = 750;
+    uint16_t silenceHangoverMs = 1400;
     uint16_t initialSilenceMs = 1800;
     uint32_t maximumUtteranceMs = 30000;
     uint16_t minimumSpeechRms = 700;
