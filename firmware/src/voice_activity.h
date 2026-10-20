@@ -20,7 +20,9 @@ struct VoiceActivityConfig {
     uint16_t initialSilenceMs = 1800;
     uint32_t maximumUtteranceMs = 30000;
     uint16_t minimumSpeechRms = 700;
+    uint16_t minimumContinuationRms = 350;
     uint8_t noiseMultiplier = 3;
+    uint8_t continuationNoiseMultiplier = 2;
 };
 
 struct VoiceFrame {
@@ -42,7 +44,7 @@ public:
     uint16_t noiseFloorRms() const { return _noiseFloorRms; }
 
 private:
-    bool isSpeech(uint16_t rms) const;
+    bool isSpeech(uint16_t rms, bool continuation) const;
 
     VoiceActivityConfig _config;
     bool _speechStarted = false;

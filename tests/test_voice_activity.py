@@ -28,6 +28,13 @@ def test_vad_allows_a_natural_pause_before_finishing():
     assert "_trailingSilenceMs >= _config.silenceHangoverMs" in VOICE_SOURCE
 
 
+def test_vad_uses_lower_threshold_for_quiet_continuation():
+    assert "minimumContinuationRms" in VOICE_HEADER
+    assert "continuationNoiseMultiplier" in VOICE_HEADER
+    assert "isSpeech(frame.rms, _speechStarted)" in VOICE_SOURCE
+    assert "minimumContinuationRms" in VOICE_SOURCE
+
+
 def test_firmware_recorder_uses_preroll_and_patches_wav_length():
     assert "VAD_PREROLL_FRAMES = 12" in FIRMWARE_SOURCE
     assert "heap_caps_malloc(prerollBytes, MALLOC_CAP_SPIRAM)" in FIRMWARE_SOURCE

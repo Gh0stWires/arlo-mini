@@ -5,12 +5,18 @@ namespace arlo_voice {
 VoiceActivity::VoiceActivity(const VoiceActivityConfig &config)
     : _config(config) {}
 
-bool VoiceActivity::isSpeech(uint16_t rms) const {
-    const uint32_t adaptiveThreshold =
-        static_cast<uint32_t>(_noiseFloorRms) * _config.noiseMultiplier;
-    const uint32_t threshold = adaptiveThreshold > _config.minimumSpeechRms
-        ? adaptiveThreshold
+bool VoiceActivity::isSpeech(uint16_t rms, bool continuation) const {
+    const uint16_t minimum = continuation
+        ? _config.minimumContinuationRms
         : _config.minimumSpeechRms;
+    const uint8_t multiplier = continuation
+        ? _config.continuationNoiseMultiplier
+        : _config.noiseMultiplier;
+    const uint32_t adaptiveThreshold =
+        static_cast<uint32_t>(_noiseFloorRms) * multiplier;
+    const uint32_t threshold = adaptiveThreshold > minimum
+        ? adaptiveThreshold
+        : minimum;
     return rms >= threshold;
 }
 
@@ -25,7 +31,7 @@ CaptureDecision VoiceActivity::push(const VoiceFrame &frame) {
         return _decision;
     }
 
-    const bool speech = isSpeech(frame.rms);
+    const bool speech = isSpeech(frame.rms, _speechStarted);
     if (!_speechStarted) {
         if (!speech) {
             // Slowly track ambient noise without allowing a loud frame to
