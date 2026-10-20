@@ -88,6 +88,8 @@ unsigned long lastWiFiAttempt = 0;
 unsigned long lastRedraw = 0;
 unsigned long lastBlinked = 0;
 unsigned long wakeCooldownUntil = 0;
+bool previousInterruptionWake = false;
+unsigned long interruptionIgnoreUntil = 0;
 
 uint32_t faceFillColor(const String &state) {
     if (state == "error") return FACE_ERROR;
@@ -349,6 +351,33 @@ void setCommonHeaders(HTTPClient &http) {
     http.addHeader("X-Device-Key", DEVICE_KEY);
 }
 
+void armWakeInterruption() {
+    previousInterruptionWake = asr.isWakeUp();
+    interruptionIgnoreUntil = millis() + 1500UL;
+}
+
+bool checkWakeInterruption() {
+    bool current = asr.isWakeUp();
+    bool requested = false;
+    if (millis() >= interruptionIgnoreUntil) {
+        requested = current && !previousInterruptionWake;
+    }
+    previousInterruptionWake = current;
+    return requested;
+}
+
+bool cancelBridgeJob(const String &id) {
+    if (WiFi.status() != WL_CONNECTED) return false;
+    HTTPClient http;
+    http.begin(String(BRIDGE_BASE_URL) + "/jobs/" + id + "/cancel");
+    http.setTimeout(5000);
+    setCommonHeaders(http);
+    int code = http.POST("");
+    Serial.printf("POST /jobs/%s/cancel -> %d\n", id.c_str(), code);
+    http.end();
+    return code == 200;
+}
+
 void fillWavHeader(uint8_t *header, uint32_t dataBytes) {
     memset(header, 0, 44);
     header[0] = 'R'; header[1] = 'I'; header[2] = 'F'; header[3] = 'F';
@@ -572,6 +601,11 @@ String createJob() {
 String pollJob(const String &id) {
     unsigned long start = millis();
     while (millis() - start < JOB_TIMEOUT_MS) {
+        if (checkWakeInterruption()) {
+            cancelBridgeJob(id);
+            Serial.println("Wake-word interruption requested during job");
+            return "interrupted";
+        }
         if (WiFi.status() != WL_CONNECTED) return "error";
         HTTPClient http;
         http.begin(String(BRIDGE_BASE_URL) + "/jobs/" + id);
@@ -796,8 +830,8 @@ void settleMouthAfterPlayback(uint8_t mouthFrame) {
     }
 }
 
-void playback() {
-    if (!SD.exists(OUTPUT_WAV)) return;
+bool playback(const String &activeJobId) {
+    if (!SD.exists(OUTPUT_WAV)) return false;
     unsigned long expectedMs = outputWavDurationMs();
     unsigned long minimumPlaybackMs = expectedMs + 750UL;
     unsigned long timeoutMs = max(minimumPlaybackMs + 15000UL, 30000UL);
@@ -818,6 +852,19 @@ void playback() {
     bool started = false;
     uint8_t mouthFrame = 0;
     while (millis() - began < timeoutMs) {
+        if (checkWakeInterruption()) {
+            Serial.println("Wake-word interruption requested during playback");
+            cancelBridgeJob(activeJobId);
+            music.stopPlayAudio();
+            unsigned long stopStarted = millis();
+            while (k10.getPlayMusicState() != 0 &&
+                   millis() - stopStarted < 3000UL) {
+                delay(20);
+            }
+            SD.remove(OUTPUT_WAV);
+            face("listening", "Interrupted - listening");
+            return true;
+        }
         bool playing = k10.getPlayMusicState() != 0;
         if (playing && !started) {
             started = true;
@@ -867,6 +914,7 @@ void playback() {
         music.stopPlayAudio();
     }
     settleMouthAfterPlayback(mouthFrame);
+    return false;
 }
 
 bool voiceTurn(bool followup) {
@@ -883,6 +931,10 @@ bool voiceTurn(bool followup) {
         return false;
     }
     String outcome = pollJob(job);
+    if (outcome == "interrupted") {
+        face("listening", "Interrupted - listening");
+        return false;
+    }
     if (outcome == "conversation_end") {
         face("thinking", "Saying goodbye...");
         if (!fetchAudio(job)) {
@@ -890,7 +942,7 @@ bool voiceTurn(bool followup) {
             delay(2000);
             return false;
         }
-        playback();
+        playback(job);
         face("idle", "Talk to you later");
         Serial.println("Conversation ended by explicit phrase");
         return true;
@@ -910,7 +962,8 @@ bool voiceTurn(bool followup) {
         delay(2000);
         return false;
     }
-    playback();
+    bool interrupted = playback(job);
+    if (interrupted) return false;
     return false;
 }
 
@@ -920,6 +973,7 @@ void conversation() {
         return;
     }
     wakeCooldownUntil = millis() + 6000;
+    armWakeInterruption();
     const unsigned long sessionStarted = millis();
     bool followup = false;
     while (millis() - sessionStarted < CONVERSATION_SESSION_MS) {

@@ -48,6 +48,14 @@ def test_conversation_uses_a_session_deadline_not_fixed_followups():
     assert "MAX_FOLLOWUPS" not in FIRMWARE_SOURCE
 
 
+def test_firmware_supports_wake_word_interruption_path():
+    assert "checkWakeInterruption()" in FIRMWARE_SOURCE
+    assert "cancelBridgeJob(id)" in FIRMWARE_SOURCE
+    assert "music.stopPlayAudio()" in FIRMWARE_SOURCE
+    assert "return \"interrupted\"" in FIRMWARE_SOURCE
+    assert "bool playback(const String &activeJobId)" in FIRMWARE_SOURCE
+
+
 def test_voice_turn_no_longer_uses_fixed_duration_recorder():
     assert "recordUntilSpeechEnds()" in FIRMWARE_SOURCE
     assert "music.recordSaveToTFCard" not in FIRMWARE_SOURCE
