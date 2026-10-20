@@ -394,6 +394,7 @@ String pollJob(const String &id) {
                 String state = doc["state"].as<String>();
                 if (state == "ready" || state == "no_speech" || state == "conversation_end" || state == "error") {
                     if (state == "error") Serial.println(doc["error"].as<String>());
+                    Serial.printf("Job terminal state=%s\n", state.c_str());
                     http.end();
                     return state;
                 }
@@ -677,7 +678,7 @@ void playback() {
     settleMouthAfterPlayback(mouthFrame);
 }
 
-void voiceTurn(bool followup) {
+bool voiceTurn(bool followup) {
     face("listening", followup ? "Anything else?" : "Listening now");
     // SDK recording is fixed-duration. VAD and interruption are future milestones.
     SD.remove(INPUT_WAV);
@@ -687,7 +688,7 @@ void voiceTurn(bool followup) {
     if (job.isEmpty()) {
         face("error", "Upload failed");
         delay(2000);
-        return;
+        return false;
     }
     String outcome = pollJob(job);
     if (outcome == "conversation_end") {
@@ -695,28 +696,30 @@ void voiceTurn(bool followup) {
         if (!fetchAudio(job)) {
             face("error", "Goodbye audio failed");
             delay(2000);
-            return;
+            return false;
         }
         playback();
         face("idle", "Talk to you later");
-        return;
+        Serial.println("Conversation ended by explicit phrase");
+        return true;
     }
     if (outcome == "no_speech") {
         face("idle", "Say Jarvis to talk");
-        return;
+        return false;
     }
     if (outcome != "ready") {
         face("error", "Bridge error - see USB");
         delay(2000);
-        return;
+        return false;
     }
     face("thinking", "Getting voice...");
     if (!fetchAudio(job)) {
         face("error", "Download failed");
         delay(2000);
-        return;
+        return false;
     }
     playback();
+    return false;
 }
 
 void conversation() {
@@ -729,7 +732,8 @@ void conversation() {
     // A silence turn exits. Wake detector is NOT consulted during conversation.
     for (int i = 0; i <= MAX_FOLLOWUPS; ++i) {
         bool followup = i > 0;
-        voiceTurn(followup);
+        bool ended = voiceTurn(followup);
+        if (ended) break;
         // After each turn, continue only when turn succeeded. Our prototype
         // checks the state label: on silence/error it becomes idle/error.
         if (faceState == "idle" || faceState == "error") break;
