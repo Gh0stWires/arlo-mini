@@ -42,6 +42,12 @@ def test_firmware_recorder_uses_preroll_and_patches_wav_length():
     assert "fillWavHeader(header, dataBytes)" in FIRMWARE_SOURCE
 
 
+def test_conversation_uses_a_session_deadline_not_fixed_followups():
+    assert "CONVERSATION_SESSION_MS" in FIRMWARE_SOURCE
+    assert "while (millis() - sessionStarted < CONVERSATION_SESSION_MS)" in FIRMWARE_SOURCE
+    assert "MAX_FOLLOWUPS" not in FIRMWARE_SOURCE
+
+
 def test_voice_turn_no_longer_uses_fixed_duration_recorder():
     assert "recordUntilSpeechEnds()" in FIRMWARE_SOURCE
     assert "music.recordSaveToTFCard" not in FIRMWARE_SOURCE

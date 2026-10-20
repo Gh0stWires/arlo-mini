@@ -63,7 +63,7 @@ constexpr uint16_t VAD_FRAME_MS = 20;
 constexpr uint16_t VAD_FRAME_BYTES = 1280;
 constexpr uint16_t VAD_PREROLL_FRAMES = 12;
 constexpr uint32_t VAD_MAX_UTTERANCE_MS = 30000;
-constexpr int MAX_FOLLOWUPS = 2;
+constexpr unsigned long CONVERSATION_SESSION_MS = 300000UL;
 constexpr size_t MIN_WAV_BYTES = 1000;
 constexpr unsigned long JOB_TIMEOUT_MS = 250000;
 constexpr unsigned long RECONNECT_EVERY_MS = 8000;
@@ -920,16 +920,16 @@ void conversation() {
         return;
     }
     wakeCooldownUntil = millis() + 6000;
-    // First turn plus two automatic follow-up recording windows. No buttons.
-    // A silence turn exits. Wake detector is NOT consulted during conversation.
-    for (int i = 0; i <= MAX_FOLLOWUPS; ++i) {
-        bool followup = i > 0;
+    const unsigned long sessionStarted = millis();
+    bool followup = false;
+    while (millis() - sessionStarted < CONVERSATION_SESSION_MS) {
         bool ended = voiceTurn(followup);
         if (ended) break;
-        // After each turn, continue only when turn succeeded. Our prototype
-        // checks the state label: on silence/error it becomes idle/error.
+        // A silence turn or error ends the session. Successful turns leave the
+        // face in speaking state, so the next iteration opens follow-up audio.
         if (faceState == "idle" || faceState == "error") break;
-        if (i < MAX_FOLLOWUPS) delay(450);
+        followup = true;
+        delay(450);
     }
     face("idle", "Say Jarvis to talk");
     wakeCooldownUntil = millis() + 2000;
