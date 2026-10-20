@@ -5,13 +5,14 @@
 ## What it does
 
 1. K10 listens locally for the **factory English wake word “Jarvis” or “Hi Telly”**. **It does not yet respond to “Hey ARLO.”**
-2. The K10 records a fixed **5-second WAV** through its onboard microphone into a FAT32 microSD card.
+2. After wake-up, the K10 records a variable-length utterance through its onboard microphone. A firmware-side adaptive RMS voice-activity detector tolerates normal pauses and stutters, preserves a short pre-roll, and ends on reliable trailing silence, initial silence timeout, or a 30-second maximum.
 3. Over your private 2.4 GHz Wi-Fi, it uploads the WAV to a Python bridge on your computer.
 4. `faster-whisper` transcribes locally; the bridge calls your **Hermes Agent gateway** at `127.0.0.1:8642`.
 5. The bridge synthesizes speech locally (Windows built-in speech, Linux `espeak-ng`, or Piper) and converts it to **16kHz / 16-bit / stereo PCM WAV** with FFmpeg.
-6. The K10 downloads that file, speaks through its speaker, and animates its eyes. It then offers **two automatic 5-second follow-up windows** without needing another wake word. Silence exits.
+6. The K10 downloads that file, speaks through its speaker, and animates its eyes. It then keeps the conversation open for follow-up turns for up to five minutes, without requiring another wake word.
+7. Standalone end phrases such as **“stop,” “goodbye,” “talk to you later,” “never mind,”** and **“that’s all”** produce a friendly farewell and return to idle.
 
-This is **not** full-duplex or interruption-ready. Audio is recorded in fixed windows; speech detection is performed on the server, not in real time. It is an inexpensive first milestone, not yet the final conversational behavior.
+The current interaction is half-duplex: recording and playback are separate phases. Wake-word interruption is supported while ARLO is thinking and cancels the active bridge job. Playback is intentionally left smooth and uninterrupted; the K10 SDK holds its I2S mutex during playback, so reliable microphone interruption while ARLO is speaking is not currently supported.
 
 ## Prerequisites
 
@@ -83,7 +84,7 @@ Expected: `{"ok":true,"name":"ARLO Mini bridge",...}`. Then run same request fro
 3. Set your 2.4GHz Wi-Fi credentials. Set `BRIDGE_BASE_URL` to `http://YOUR_PC_LAN_IP:8765` (not `localhost`), plus `DEVICE_KEY` exactly as in the bridge.
 4. Insert a FAT32 microSD card before powering K10.
 5. Plug the K10 into USB-C; PlatformIO **Build**, then **Upload**. Use **Monitor** at 115200 baud for debug logs.
-6. Speak **“Jarvis”**, pause until its eyes show "Listening now", and speak your question **within the 5-second recording window**. Wait for speech playback. Then simply speak a follow-up during the next recording window.
+6. Speak **“Jarvis”**, pause until its eyes show "Listening now", and speak your question. The recorder waits for speech, tolerates ordinary pauses, and ends after trailing silence. Wait for speech playback. Then simply speak follow-up turns without another wake word.
 
 > **Language model warning:** If the board currently has the Chinese speech model flashed, `EN_MODE` may not recognize English wake words. Use DFRobot's [K10 documentation](https://www.unihiker.com/wiki/K10/) to restore the English recognition model, if needed.
 
@@ -96,7 +97,15 @@ python -m pip install pytest httpx
 python -m pytest -q tests/
 ```
 
-The tests mock transcription and synthesis, verify authentication, reject invalid/oversized input, exercise the job queue and fetch generated WAV bytes. They do **not** prove firmware compilation, speaker playback, or Wi-Fi functionality.
+The tests mock transcription and synthesis, verify authentication, reject invalid/oversized input, exercise the job queue and fetch generated WAV bytes. They also cover end phrases, friendly farewell generation, cancellation, cleanup retries, VAD state transitions, pre-roll, WAV finalization, and firmware integration markers. They do **not** replace physical speaker, microphone, or Wi-Fi validation.
+
+For the firmware build, use the project environment:
+
+```powershell
+.venv\Scripts\python.exe -m platformio run --project-dir firmware
+```
+
+Before flashing hardware, run the host tests and build. After flashing, perform a hard reset before evaluating behavior.
 
 ## Troubleshooting
 
@@ -116,10 +125,11 @@ The tests mock transcription and synthesis, verify authentication, reject invali
 ## Privacy and limitations
 
 - `DEVICE_KEY` authenticates requests on a **trusted LAN**, but HTTP has **no encryption**. Don't use public Wi-Fi, expose port 8765 to the internet, or forward that port. Use Tailscale/VPN or TLS termination if you need remote access later.
-- Wake-word detection is performed locally by the factory speech recognizer; once awake, the **entire fixed 5-second recording is sent over local Wi-Fi**. Follow-up windows also record. The bridge uses temporary files cleaned after the job expires (20 minutes), not a permanent recording archive.
+- Wake-word detection and voice-activity decisions happen on the K10. Once speech is captured, the variable-length WAV is sent over local Wi-Fi. Follow-up turns also record. The bridge uses temporary files cleaned after the job expires (20 minutes), not a permanent recording archive.
 - Hermes tools can affect your computer. For a voice-driven agent, restrict shell/filesystem/destructive tool permissions and require approvals for risky actions.
-- Fixed-duration capture can clip speech and has no barge-in. Some environmental speech can still be captured in automatic follow-up windows.
-- The custom **“Hey ARLO”** wake word, true continuous conversational VAD, and hardware compile/real-device playback validation are future work.
+- Natural pauses are supported, but very quiet speech or loud background noise can still affect endpoint detection. The maximum utterance is 30 seconds and the follow-up session is limited to five minutes.
+- Thinking-state wake-word interruption cancels the active bridge job. Speaking-state interruption is intentionally not enabled so playback remains smooth.
+- The custom **“Hey ARLO”** wake word remains future work.
 
 ## Key sources
 
@@ -128,13 +138,14 @@ The tests mock transcription and synthesis, verify authentication, reject invali
 - [Hermes Agent API documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server/)
 
 
-## v0.1.1 — Boot-loop diagnostic patch
+## Boot diagnostics and hardware notes
 
-This update is **not yet tested on a physical K10**. It retains the v0.1
-features but adds boot checkpoints on USB serial before and after SD, ASR,
+The firmware includes boot checkpoints on USB serial before and after SD, ASR,
 and Wi-Fi initialization, and avoids large temporary graphics buffers caused
-by redundant `autoClean=true` calls. Neither the PC bridge nor the Hermes
-configuration needs to change.
+by redundant `autoClean=true` calls. The current voice interaction has been
+compiled, flashed, hard-reset, and boot-checked on a physical K10. Neither the
+PC bridge nor the Hermes configuration needs to change for the firmware
+diagnostic flags below.
 
 **Important:** Copy your previous `firmware/include/secrets.h` into this
 new project's `firmware/include/` directory. It is intentionally excluded
