@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import wave
 from pathlib import Path
 
@@ -45,6 +46,24 @@ def test_silence_returns_no_speech(monkeypatch):
     jid = response.json()['id']
     status = client.get(f'/jobs/{jid}', headers=KEY).json()
     assert status['state'] == 'no_speech'
+
+
+def test_cleanup_keeps_locked_job_for_a_later_retry(monkeypatch):
+    class LockedDirectory:
+        def cleanup(self):
+            raise OSError('reply audio is still in use')
+
+    job = type('JobStub', (), {
+        'created': time.time() - server.JOB_TTL - 1,
+        'state': 'conversation_end',
+        'directory': LockedDirectory(),
+    })()
+    jobs = {'locked': job}
+    monkeypatch.setattr(server, 'jobs', jobs)
+
+    server.cleanup_jobs()
+
+    assert jobs['locked'] is job
 
 
 def test_talk_to_you_later_ends_conversation_with_a_farewell(monkeypatch):

@@ -93,7 +93,15 @@ def cleanup_jobs():
                    if now - job.created > JOB_TTL and job.state in (
                        'ready', 'no_speech', 'conversation_end', 'error')]
         for jid in expired:
-            jobs.pop(jid).directory.cleanup()
+            job = jobs[jid]
+            try:
+                job.directory.cleanup()
+            except OSError:
+                # Windows can temporarily lock reply.wav while the K10 is
+                # downloading it. Keep the terminal job so cleanup can retry
+                # on the next turn instead of taking down the bridge.
+                continue
+            jobs.pop(jid, None)
 
 
 def get_job(jid: str) -> Job:
