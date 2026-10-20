@@ -63,6 +63,7 @@ class Job:
     transcript: str = ''
     error: str = ''
     audio_path: Optional[Path] = None
+    cancel_requested: bool = False
     created: float = field(default_factory=time.time)
 
 jobs: dict[str, Job] = {}
@@ -91,7 +92,7 @@ def cleanup_jobs():
     with jobs_lock:
         expired = [jid for jid, job in jobs.items()
                    if now - job.created > JOB_TTL and job.state in (
-                       'ready', 'no_speech', 'conversation_end', 'error')]
+                       'ready', 'no_speech', 'conversation_end', 'error', 'cancelled')]
         for jid in expired:
             job = jobs[jid]
             try:
@@ -110,6 +111,17 @@ def get_job(jid: str) -> Job:
     if job is None:
         raise HTTPException(404, 'Unknown job')
     return job
+
+
+def is_cancelled(job: Job) -> bool:
+    with jobs_lock:
+        return job.cancel_requested or job.state == 'cancelled'
+
+
+def cancel_job(job: Job) -> None:
+    with jobs_lock:
+        job.cancel_requested = True
+        job.state = 'cancelled'
 
 
 def speech_to_text(path: Path) -> str:
@@ -234,9 +246,13 @@ def run_job(jid: str, input_path: Path) -> None:
     job = get_job(jid)
     try:
         with run_lock:
+            if is_cancelled(job):
+                return
             job.state = 'transcribing'
             text = speech_to_text(input_path)
             job.transcript = text
+            if is_cancelled(job):
+                return
             if not text:
                 job.state = 'no_speech'
                 return
@@ -246,12 +262,18 @@ def run_job(jid: str, input_path: Path) -> None:
             else:
                 job.state = 'thinking'
                 job.answer = ask_hermes(text)
+            if is_cancelled(job):
+                return
             job.state = 'speaking'
             target = Path(job.directory.name) / 'reply.wav'
             speech_to_wav(job.answer, target, Path(job.directory.name))
+            if is_cancelled(job):
+                return
             job.audio_path = target
             job.state = 'conversation_end' if end_conversation else 'ready'
     except Exception as exc:
+        if is_cancelled(job):
+            return
         # Error detail deliberately exposed only to a client possessing the device key.
         job.error = f'{type(exc).__name__}: {str(exc)[:240]}'
         job.state = 'error'
@@ -270,7 +292,7 @@ async def start_turn(request: Request, background_tasks: BackgroundTasks,
     cleanup_jobs()
     with jobs_lock:
         busy = any(j.state not in (
-            'ready', 'no_speech', 'conversation_end', 'error')
+            'ready', 'no_speech', 'conversation_end', 'error', 'cancelled')
                    for j in jobs.values())
     if busy:
         raise HTTPException(409, 'Bridge is busy')
@@ -302,6 +324,14 @@ def job_status(jid: str, x_device_key: Optional[str] = Header(default=None)):
     return {'id': job.id, 'state': job.state, 'transcript': job.transcript,
             'answer': job.answer if job.state in ('ready', 'conversation_end') else '',
             'error': job.error}
+
+
+@app.post('/jobs/{jid}/cancel')
+def cancel_job_endpoint(jid: str, x_device_key: Optional[str] = Header(default=None)):
+    require_key(x_device_key)
+    job = get_job(jid)
+    cancel_job(job)
+    return {'id': job.id, 'state': 'cancelled'}
 
 
 @app.get('/jobs/{jid}/audio')

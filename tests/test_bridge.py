@@ -101,6 +101,47 @@ def test_exit_phrase_matching_is_conservative():
     assert server.is_conversation_end_phrase('talk to you later about the project') is False
 
 
+def test_cancel_job_is_authenticated_and_idempotent():
+    directory = tempfile.TemporaryDirectory(prefix='arlo-test-cancel-')
+    jid = 'cancel-test-job'
+    server.jobs[jid] = server.Job(id=jid, directory=directory)
+    try:
+        assert client.post(f'/jobs/{jid}/cancel').status_code == 401
+        response = client.post(f'/jobs/{jid}/cancel', headers=KEY)
+        assert response.status_code == 200
+        assert response.json()['state'] == 'cancelled'
+        repeated = client.post(f'/jobs/{jid}/cancel', headers=KEY)
+        assert repeated.status_code == 200
+        assert repeated.json()['state'] == 'cancelled'
+        status = client.get(f'/jobs/{jid}', headers=KEY).json()
+        assert status['state'] == 'cancelled'
+        assert client.get(f'/jobs/{jid}/audio', headers=KEY).status_code == 409
+    finally:
+        server.jobs.pop(jid, None)
+        directory.cleanup()
+
+
+def test_cancelled_job_never_starts_transcription(monkeypatch):
+    directory = tempfile.TemporaryDirectory(prefix='arlo-test-cancel-run-')
+    jid = 'cancel-before-run'
+    server.jobs[jid] = server.Job(id=jid, directory=directory, state='cancelled')
+    called = False
+
+    def fail_if_called(path):
+        nonlocal called
+        called = True
+        raise AssertionError('cancelled job must not transcribe')
+
+    monkeypatch.setattr(server, 'speech_to_text', fail_if_called)
+    try:
+        server.run_job(jid, Path(directory.name) / 'input.wav')
+        assert called is False
+        assert server.jobs[jid].state == 'cancelled'
+    finally:
+        server.jobs.pop(jid, None)
+        directory.cleanup()
+
+
 def test_full_turn_and_audio_download(monkeypatch):
     monkeypatch.setattr(server, 'speech_to_text', lambda p: 'What is your name?')
 
