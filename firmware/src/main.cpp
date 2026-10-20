@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <math.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -12,6 +13,7 @@
 #include "unihiker_k10.h"
 #include "asr.h"
 #include "face_animation.h"
+#include "voice_activity.h"
 #include "secrets.h"
 
 #ifndef WIFI_FORCE_BSSID
@@ -47,6 +49,7 @@ void checkpoint(const char *step) {
 UNIHIKER_K10 k10;
 Music music;
 ASR asr;
+extern SemaphoreHandle_t xSPIlMutex;
 
 constexpr uint32_t INK = 0x07111B;
 constexpr uint32_t OUTLINE = 0x2A1723;
@@ -56,7 +59,10 @@ constexpr uint32_t FACE_ERROR = 0xE9783D;
 constexpr uint32_t EYE_CREAM = 0xFFF1C7;
 constexpr uint32_t MOUTH_WINE = 0x5B1E2A;
 constexpr uint32_t WHITE = 0xFFF8E8;
-constexpr uint8_t RECORD_SECONDS = 5;
+constexpr uint16_t VAD_FRAME_MS = 20;
+constexpr uint16_t VAD_FRAME_BYTES = 1280;
+constexpr uint16_t VAD_PREROLL_FRAMES = 12;
+constexpr uint32_t VAD_MAX_UTTERANCE_MS = 30000;
 constexpr int MAX_FOLLOWUPS = 2;
 constexpr size_t MIN_WAV_BYTES = 1000;
 constexpr unsigned long JOB_TIMEOUT_MS = 250000;
@@ -341,6 +347,191 @@ void connectWifi() {
 
 void setCommonHeaders(HTTPClient &http) {
     http.addHeader("X-Device-Key", DEVICE_KEY);
+}
+
+void fillWavHeader(uint8_t *header, uint32_t dataBytes) {
+    memset(header, 0, 44);
+    header[0] = 'R'; header[1] = 'I'; header[2] = 'F'; header[3] = 'F';
+    uint32_t fileBytes = dataBytes + 36;
+    header[4] = fileBytes & 0xFF; header[5] = (fileBytes >> 8) & 0xFF;
+    header[6] = (fileBytes >> 16) & 0xFF; header[7] = (fileBytes >> 24) & 0xFF;
+    header[8] = 'W'; header[9] = 'A'; header[10] = 'V'; header[11] = 'E';
+    header[12] = 'f'; header[13] = 'm'; header[14] = 't'; header[15] = ' ';
+    header[16] = 16; header[20] = 1;
+    header[22] = 2;
+    uint32_t sampleRate = 16000;
+    uint32_t byteRate = 64000;
+    header[24] = sampleRate & 0xFF; header[25] = (sampleRate >> 8) & 0xFF;
+    header[26] = (sampleRate >> 16) & 0xFF; header[27] = (sampleRate >> 24) & 0xFF;
+    header[28] = byteRate & 0xFF; header[29] = (byteRate >> 8) & 0xFF;
+    header[30] = (byteRate >> 16) & 0xFF; header[31] = (byteRate >> 24) & 0xFF;
+    header[32] = 4; header[34] = 16;
+    header[36] = 'd'; header[37] = 'a'; header[38] = 't'; header[39] = 'a';
+    header[40] = dataBytes & 0xFF; header[41] = (dataBytes >> 8) & 0xFF;
+    header[42] = (dataBytes >> 16) & 0xFF; header[43] = (dataBytes >> 24) & 0xFF;
+}
+
+uint16_t audioFrameRms(const uint8_t *buffer, size_t bytes) {
+    uint64_t sumSquares = 0;
+    uint32_t samples = 0;
+    for (size_t offset = 0; offset + 3 < bytes; offset += 4) {
+        int32_t left = static_cast<int16_t>(
+            static_cast<uint16_t>(buffer[offset]) |
+            (static_cast<uint16_t>(buffer[offset + 1]) << 8));
+        int32_t right = static_cast<int16_t>(
+            static_cast<uint16_t>(buffer[offset + 2]) |
+            (static_cast<uint16_t>(buffer[offset + 3]) << 8));
+        int32_t sample = (left + right) / 2;
+        sumSquares += static_cast<uint64_t>(sample * sample);
+        ++samples;
+    }
+    if (samples == 0) return 0;
+    uint32_t rms = static_cast<uint32_t>(sqrtf(
+        static_cast<float>(sumSquares) / samples));
+    return static_cast<uint16_t>(min<uint32_t>(rms, 65535));
+}
+
+bool writeRecordingBytes(lv_fs_file_t *file, const uint8_t *data, size_t bytes) {
+    xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+    lv_fs_res_t result = lv_fs_write(file, data, bytes, nullptr);
+    xSemaphoreGive(xSPIlMutex);
+    return result == LV_FS_RES_OK;
+}
+
+bool recordUntilSpeechEnds() {
+    constexpr size_t prerollBytes =
+        static_cast<size_t>(VAD_PREROLL_FRAMES) * VAD_FRAME_BYTES;
+    uint8_t *frame = static_cast<uint8_t *>(
+        heap_caps_malloc(VAD_FRAME_BYTES, MALLOC_CAP_SPIRAM));
+    uint8_t *preroll = static_cast<uint8_t *>(
+        heap_caps_malloc(prerollBytes, MALLOC_CAP_SPIRAM));
+    if (!frame || !preroll) {
+        if (frame) heap_caps_free(frame);
+        if (preroll) heap_caps_free(preroll);
+        Serial.println("VAD capture buffer allocation failed");
+        return false;
+    }
+
+    lv_fs_file_t file;
+    xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+    lv_fs_res_t openResult = lv_fs_open(&file, "S:/request.wav", LV_FS_MODE_WR);
+    xSemaphoreGive(xSPIlMutex);
+    if (openResult != LV_FS_RES_OK) {
+        heap_caps_free(frame);
+        heap_caps_free(preroll);
+        Serial.println("VAD request WAV open failed");
+        return false;
+    }
+
+    uint8_t header[44];
+    fillWavHeader(header, 0);
+    if (!writeRecordingBytes(&file, header, sizeof(header))) {
+        xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+        lv_fs_close(&file);
+        xSemaphoreGive(xSPIlMutex);
+        heap_caps_free(frame);
+        heap_caps_free(preroll);
+        Serial.println("VAD request WAV header write failed");
+        return false;
+    }
+
+    arlo_voice::VoiceActivityConfig config;
+    config.frameMs = VAD_FRAME_MS;
+    config.maximumUtteranceMs = VAD_MAX_UTTERANCE_MS;
+    arlo_voice::VoiceActivity activity(config);
+    digital_write(eAmp_Gain, 1);
+    uint32_t dataBytes = 0;
+    uint32_t frameIndex = 0;
+    uint16_t ringCount = 0;
+    uint16_t ringWrite = 0;
+    bool writing = false;
+    bool failed = false;
+
+    xSemaphoreTake(xI2SMutex, portMAX_DELAY);
+    while (!failed) {
+        size_t bytesRead = 0;
+        i2s_read(I2S_NUM_0, frame, VAD_FRAME_BYTES, &bytesRead, portMAX_DELAY);
+        if (bytesRead != VAD_FRAME_BYTES) {
+            Serial.printf("VAD short I2S frame %u/%u\n",
+                          (unsigned)bytesRead, (unsigned)VAD_FRAME_BYTES);
+            failed = true;
+            break;
+        }
+
+        const uint32_t elapsedMs = frameIndex * VAD_FRAME_MS;
+        const uint16_t rms = audioFrameRms(frame, bytesRead);
+        arlo_voice::CaptureDecision decision = activity.push({elapsedMs, rms});
+        memcpy(preroll + static_cast<size_t>(ringWrite) * VAD_FRAME_BYTES,
+               frame, VAD_FRAME_BYTES);
+        ringWrite = (ringWrite + 1) % VAD_PREROLL_FRAMES;
+        if (ringCount < VAD_PREROLL_FRAMES) ++ringCount;
+
+        if (!writing && activity.speechStarted()) {
+            uint16_t oldest = (ringWrite + VAD_PREROLL_FRAMES - ringCount) %
+                              VAD_PREROLL_FRAMES;
+            for (uint16_t i = 0; i < ringCount; ++i) {
+                uint16_t index = (oldest + i) % VAD_PREROLL_FRAMES;
+                if (!writeRecordingBytes(&file,
+                        preroll + static_cast<size_t>(index) * VAD_FRAME_BYTES,
+                        VAD_FRAME_BYTES)) {
+                    failed = true;
+                    break;
+                }
+                dataBytes += VAD_FRAME_BYTES;
+            }
+            writing = !failed;
+            if (writing) Serial.printf("VAD speech start rms=%u ms=%lu\n",
+                                       rms, (unsigned long)activity.speechStartMs());
+        } else if (writing) {
+            if (!writeRecordingBytes(&file, frame, VAD_FRAME_BYTES)) {
+                failed = true;
+            } else {
+                dataBytes += VAD_FRAME_BYTES;
+            }
+        }
+
+        if ((frameIndex % 25) == 0) {
+            Serial.printf("VAD frame ms=%lu rms=%u state=%u silence=%lu\n",
+                          (unsigned long)elapsedMs, rms,
+                          static_cast<unsigned>(decision),
+                          (unsigned long)activity.trailingSilenceMs());
+        }
+        ++frameIndex;
+        if (decision == arlo_voice::CaptureDecision::Finished ||
+            decision == arlo_voice::CaptureDecision::InitialSilenceTimeout ||
+            decision == arlo_voice::CaptureDecision::MaximumDuration) {
+            break;
+        }
+    }
+    xSemaphoreGive(xI2SMutex);
+
+    bool success = false;
+    if (!failed && writing && dataBytes >= MIN_WAV_BYTES) {
+        fillWavHeader(header, dataBytes);
+        xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+        bool patched = lv_fs_seek(&file, 0, LV_FS_SEEK_SET) == LV_FS_RES_OK &&
+                       lv_fs_write(&file, header, sizeof(header), nullptr) == LV_FS_RES_OK;
+        lv_fs_close(&file);
+        xSemaphoreGive(xSPIlMutex);
+        success = patched;
+    } else {
+        xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+        lv_fs_close(&file);
+        xSemaphoreGive(xSPIlMutex);
+    }
+    digital_write(eAmp_Gain, 0);
+    heap_caps_free(frame);
+    heap_caps_free(preroll);
+    if (!success) {
+        SD.remove(INPUT_WAV);
+        Serial.printf("VAD capture ended without uploadable speech bytes=%lu\n",
+                      (unsigned long)dataBytes);
+    } else {
+        Serial.printf("VAD capture complete bytes=%lu duration=%lu ms\n",
+                      (unsigned long)dataBytes,
+                      (unsigned long)(dataBytes * 1000ULL / 64000ULL));
+    }
+    return success;
 }
 
 // POST WAV by streaming from microSD, without allocating the whole audio in RAM.
@@ -679,10 +870,11 @@ void playback() {
 }
 
 bool voiceTurn(bool followup) {
-    face("listening", followup ? "Anything else?" : "Listening now");
-    // SDK recording is fixed-duration. VAD and interruption are future milestones.
-    SD.remove(INPUT_WAV);
-    music.recordSaveToTFCard("S:/request.wav", RECORD_SECONDS);
+    face("listening", followup ? "Listening..." : "Listening now");
+    if (!recordUntilSpeechEnds()) {
+        face("idle", "Say Jarvis to talk");
+        return false;
+    }
     face("thinking", "Sending audio...");
     String job = createJob();
     if (job.isEmpty()) {
