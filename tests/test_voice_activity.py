@@ -49,11 +49,9 @@ def test_conversation_uses_a_session_deadline_not_fixed_followups():
 
 
 def test_firmware_supports_wake_word_interruption_path():
-    assert "checkWakeInterruption()" in FIRMWARE_SOURCE
-    assert "cancelBridgeJob(id)" in FIRMWARE_SOURCE
-    assert "music.stopPlayAudio()" in FIRMWARE_SOURCE
-    assert "return \"interrupted\"" in FIRMWARE_SOURCE
-    assert "bool playback(const String &activeJobId)" in FIRMWARE_SOURCE
+    assert "Wake-word interruption requested during job" in FIRMWARE_SOURCE
+    assert "Wake-word interruption requested during playback" not in FIRMWARE_SOURCE
+    assert "void playback()" in FIRMWARE_SOURCE
 
 
 def test_voice_turn_no_longer_uses_fixed_duration_recorder():

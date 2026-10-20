@@ -830,8 +830,8 @@ void settleMouthAfterPlayback(uint8_t mouthFrame) {
     }
 }
 
-bool playback(const String &activeJobId) {
-    if (!SD.exists(OUTPUT_WAV)) return false;
+void playback() {
+    if (!SD.exists(OUTPUT_WAV)) return;
     unsigned long expectedMs = outputWavDurationMs();
     unsigned long minimumPlaybackMs = expectedMs + 750UL;
     unsigned long timeoutMs = max(minimumPlaybackMs + 15000UL, 30000UL);
@@ -852,19 +852,6 @@ bool playback(const String &activeJobId) {
     bool started = false;
     uint8_t mouthFrame = 0;
     while (millis() - began < timeoutMs) {
-        if (checkWakeInterruption()) {
-            Serial.println("Wake-word interruption requested during playback");
-            cancelBridgeJob(activeJobId);
-            music.stopPlayAudio();
-            unsigned long stopStarted = millis();
-            while (k10.getPlayMusicState() != 0 &&
-                   millis() - stopStarted < 3000UL) {
-                delay(20);
-            }
-            SD.remove(OUTPUT_WAV);
-            face("listening", "Interrupted - listening");
-            return true;
-        }
         bool playing = k10.getPlayMusicState() != 0;
         if (playing && !started) {
             started = true;
@@ -914,7 +901,6 @@ bool playback(const String &activeJobId) {
         music.stopPlayAudio();
     }
     settleMouthAfterPlayback(mouthFrame);
-    return false;
 }
 
 bool voiceTurn(bool followup) {
@@ -942,7 +928,7 @@ bool voiceTurn(bool followup) {
             delay(2000);
             return false;
         }
-        playback(job);
+        playback();
         face("idle", "Talk to you later");
         Serial.println("Conversation ended by explicit phrase");
         return true;
@@ -962,8 +948,7 @@ bool voiceTurn(bool followup) {
         delay(2000);
         return false;
     }
-    bool interrupted = playback(job);
-    if (interrupted) return false;
+    playback();
     return false;
 }
 
