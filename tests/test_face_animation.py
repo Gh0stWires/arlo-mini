@@ -86,10 +86,19 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "mouthFrameFromAmplitude" in source
     assert "mouthFrameFromAudio" in source
     assert "AUDIO_ENVELOPE_BINS = 1024" in source
-    assert "nextMouthUpdate = now + 45" in source
+    assert "Playback duration wait complete" in source
     assert "state == \"speaking\"" in source
     assert "canvasCircle(120, 207, 8, OUTLINE" not in source
     assert "settleMouthAfterPlayback" in source
     assert "for (uint8_t minute = 0; minute < 60; ++minute)" in source
     assert "minute % 5 == 0" in source
     assert "const int starts[][2]" not in source
+
+
+def test_wide_open_mouth_uses_rounded_rectangles():
+    source = (Path(__file__).resolve().parents[1] / "firmware" / "src" / "main.cpp").read_text()
+
+    assert "void drawRoundedRect(" in source
+    assert "drawRoundedRect(99, 195, 42, 25, 6, OUTLINE);" in source
+    assert "drawRoundedRect(105, 201, 30, 13, 4, MOUTH_WINE);" in source
+    assert "canvasRectangle(99, 195, 42, 25" not in source

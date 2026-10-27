@@ -9,7 +9,7 @@
 3. Over your private 2.4 GHz Wi-Fi, it uploads the WAV to a Python bridge on your computer.
 4. `faster-whisper` transcribes locally; the bridge calls your **Hermes Agent gateway** at `127.0.0.1:8642`.
 5. The bridge synthesizes speech locally (Windows built-in speech, Linux `espeak-ng`, or Piper) and converts it to **16kHz / 16-bit / stereo PCM WAV** with FFmpeg.
-6. The K10 downloads that file, speaks through its speaker, and animates its eyes. It then keeps the conversation open for follow-up turns for up to five minutes, without requiring another wake word.
+6. The bridge splits the short reply into sentences and publishes each normalized WAV as soon as it is synthesized. The K10 downloads and plays each sentence in order, so playback can begin before the full reply finishes rendering, while animating its eyes. It then keeps the conversation open for follow-up turns for up to five minutes, without requiring another wake word.
 7. Standalone end phrases such as **“stop,” “goodbye,” “talk to you later,” “never mind,”** and **“that’s all”** produce a friendly farewell and return to idle.
 
 The current interaction is half-duplex: recording and playback are separate phases. Wake-word interruption is supported while ARLO is thinking and cancels the active bridge job. Playback is intentionally left smooth and uninterrupted; the K10 SDK holds its I2S mutex during playback, so reliable microphone interruption while ARLO is speaking is not currently supported.
@@ -55,7 +55,7 @@ Configure `bridge/.env`:
 - `HERMES_KEY`: the value you use for `API_SERVER_KEY` in `~/.hermes/.env`.
 - `HERMES_URL`: keep `http://127.0.0.1:8642/v1/chat/completions` if both run on the PC.
 - `STT_MODEL`: `base.en` is a modest starting point, change to `small.en` for greater accuracy (slower on CPU).
-- `TTS_BACKEND`: `auto`, `piper`, `sapi`, or `espeak`. For `piper`, set `PIPER_MODEL` and `PIPER_BINARY`.
+- `TTS_BACKEND`: `auto`, `piper`, `sapi`, `espeak`, `chatterbox`, or the experimental `chatterbox_cpp`. For `piper`, set `PIPER_MODEL` and `PIPER_BINARY`. For `chatterbox`, set `CHATTERBOX_REFERENCE` to a clean reference WAV and optionally `CHATTERBOX_DEVICE=cuda`.
 - To test without a running Hermes, set `MOCK_HERMES=true` (it echoes the transcription).
 
 In `~/.hermes/.env` ensure:
@@ -68,6 +68,110 @@ API_SERVER_HOST=127.0.0.1
 ```
 
 Run `hermes gateway` in another terminal. Do **not** bind Hermes itself to `0.0.0.0` for this prototype. Refer to its [API server documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server/).
+
+## Chatterbox Turbo voice
+
+The working voice path is now Chatterbox Turbo with a short reference recording.
+The previous voice-design experiment is no longer part of the runtime or setup instructions.
+The reference used for local testing lives in the ignored `voice/` directory.
+Keep that recording local, and do not add it to source control.
+
+For a final distributable voice, use an original or licensed reference
+performance. A 10–15 second, clean, dry recording works best.
+
+Create the Chatterbox environment for the bridge:
+
+```powershell
+uv venv --python 3.11 .chatterbox-venv
+uv pip install --python .chatterbox-venv/Scripts/python.exe torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+uv pip install --python .chatterbox-venv/Scripts/python.exe -r bridge/requirements.txt -r bridge/requirements-chatterbox.txt
+uv pip install --python .chatterbox-venv/Scripts/python.exe --no-deps "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@master"
+```
+
+The published Perth wheel can be incomplete on Windows, so the final command
+is required for the watermark implementation. Keep the CUDA PyTorch install
+intact after that command.
+
+Set these values in the local, ignored `bridge/.env`:
+
+```env
+TTS_BACKEND=chatterbox
+CHATTERBOX_REFERENCE=C:/path/to/arlo-mini/voice/reference.wav
+CHATTERBOX_DEVICE=cuda
+CHATTERBOX_MAX_GEN_LEN=600
+CHATTERBOX_NANO=false
+CHATTERBOX_PHRASE_STREAMING=false
+CHATTERBOX_MIN_PHRASE_WORDS=5
+CHATTERBOX_MAX_PHRASE_WORDS=10
+STT_WORKER_PYTHON=C:\\path\\to\\arlo-mini\\.venv\\Scripts\\python.exe
+```
+
+Run the bridge with the Chatterbox environment:
+
+```powershell
+.\\.chatterbox-venv\\Scripts\\python.exe bridge/server.py
+```
+
+The bridge preloads Chatterbox and its reference conditioning at startup by
+default (`CHATTERBOX_PRELOAD=true`), then keeps the model in memory for later
+ turns. Leave `CHATTERBOX_NANO=false` to use the validated Turbo model. Setting
+`CHATTERBOX_NANO=true` selects the smaller reference-cloning Nano model for a
+side-by-side latency and voice-quality experiment; it requires a recent
+Chatterbox checkout with Nano support. Startup can take longer while the model
+is loaded, but the first spoken
+reply avoids that cold-load penalty. It converts each sentence to the K10's
+required 16 kHz, 16-bit, stereo WAV format and exposes it as
+`/jobs/{id}/audio?segment=N`. The job status reports `segments_ready`,
+`segments_total`, and `stream_complete`; the K10 polls these fields and starts
+the first sentence as soon as it is available. When `STT_WORKER_PYTHON` is
+set, the bridge also keeps the isolated faster-whisper worker alive between
+turns, avoiding a full Whisper model load for every utterance.
+
+### Experimental Chatterbox.cpp CUDA backend
+
+The isolated native backend is opt-in and keeps Python Chatterbox available as
+the rollback path. It expects the CUDA-enabled `tts-cli.exe`, F16 Turbo GGUFs,
+and the cached five-tensor voice profile from the separate `chatterbox.cpp`
+checkout. Set these values in `bridge/.env`:
+
+```env
+TTS_BACKEND=chatterbox_cpp
+CHATTERBOX_CPP_BINARY=C:/path/to/chatterbox.cpp/build-cuda/Release/tts-cli.exe
+CHATTERBOX_CPP_MODEL=C:/path/to/chatterbox.cpp/models/chatterbox-t3-turbo-f16.gguf
+CHATTERBOX_CPP_S3GEN=C:/path/to/chatterbox.cpp/models/chatterbox-s3gen-f16.gguf
+CHATTERBOX_CPP_PROFILE=C:/path/to/chatterbox.cpp/models/miss-minutes-profile
+CHATTERBOX_CPP_RUNTIME_PATHS=C:/path/to/chatterbox.cpp/build-cuda/bin/Release;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.6/bin
+CHATTERBOX_CPP_THREADS=4
+CHATTERBOX_CPP_GPU_LAYERS=99
+CHATTERBOX_CPP_BATCH=true
+CHATTERBOX_CPP_LIVE_STREAM=false
+CHATTERBOX_CPP_STREAM_CHUNK_TOKENS=50
+CHATTERBOX_CPP_STREAM_FIRST_CHUNK_TOKENS=50
+```
+
+Batch mode sends each complete Hermes answer through one native process so the
+GGUF weights are loaded once per answer instead of once per sentence. The
+bridge still normalizes the native 24 kHz mono WAV to the K10's 16 kHz stereo
+format. This remains the quality reference and the complete-WAV/SD fallback.
+
+The experimental true PCM path is enabled only when both
+`TTS_BACKEND=chatterbox_cpp` and `CHATTERBOX_CPP_LIVE_STREAM=true` are set. In
+that mode the bridge starts the native live-input CLI before Hermes finishes,
+feeds complete sentence boundaries into it, converts raw 24 kHz mono S16LE to
+16 kHz stereo S16LE, and exposes the bytes at the authenticated
+`/jobs/<id>/pcm` endpoint. The K10 experimental firmware buffers that stream in
+PSRAM and writes it directly to `i2s_write()` while synthesis is still running.
+The normalized bytes are also retained as a complete WAV so the existing SD
+path remains available if no PCM bytes reached the speaker. The PCM mode is
+experimental and must be physically validated before replacing the Python
+Turbo default.
+
+For an experimental lower time-to-first-audio mode, set
+`CHATTERBOX_PHRASE_STREAMING=true`. The bridge then emits natural clause-sized
+segments between 5 and 10 words when punctuation or a safe word boundary is
+available. This can start Turbo earlier, but very short segments may create
+audible gaps on the K10; sentence streaming remains the default.
+
 
 **Connectivity test on the PC:**
 
@@ -98,6 +202,24 @@ python -m pytest -q tests/
 ```
 
 The tests mock transcription and synthesis, verify authentication, reject invalid/oversized input, exercise the job queue and fetch generated WAV bytes. They also cover end phrases, friendly farewell generation, cancellation, cleanup retries, VAD state transitions, pre-roll, WAV finalization, and firmware integration markers. They do **not** replace physical speaker, microphone, or Wi-Fi validation.
+
+### Voice latency benchmark
+
+Run the repeatable warm/cold Turbo benchmark from the repository root with the
+same reference and Chatterbox environment used by the bridge:
+
+```powershell
+.\\.chatterbox-venv\\Scripts\\python.exe tools/benchmark_voice.py `
+  --reference voice/reference.wav --runs 5 `
+  --output .hermes/voice-benchmark.json
+```
+
+The report separates model preload and reference conditioning from warm
+sentence generation, FFmpeg normalization, generated audio duration, and
+real-time factor. The current Chatterbox `generate()` API returns a complete
+waveform, so first-audio-chunk latency is not available from this benchmark;
+the live bridge reports first sentence WAV readiness separately through the job
+status `timings` object.
 
 For the firmware build, use the project environment:
 

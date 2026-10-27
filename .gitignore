@@ -1,6 +1,8 @@
 # Python environments, caches, and test artifacts
 .venv/
 **/.venv/
+.chatterbox-venv/
+.f5-tts-venv/
 __pycache__/
 **/__pycache__/
 .pytest_cache/
@@ -25,6 +27,7 @@ firmware/include/secrets.h
 *.log
 logs/
 recordings/
+voice/
 
 # Hermes/Desktop working metadata
 .hermes/

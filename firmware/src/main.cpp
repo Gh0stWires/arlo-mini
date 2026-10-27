@@ -10,6 +10,8 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <SD.h>
+#include <driver/i2s.h>
+#include <freertos/ringbuf.h>
 #include "unihiker_k10.h"
 #include "asr.h"
 #include "face_animation.h"
@@ -73,6 +75,11 @@ constexpr uint16_t AUDIO_ENVELOPE_BINS = 1024;
 uint8_t audioEnvelope[AUDIO_ENVELOPE_BINS];
 uint32_t audioEnvelopeSum[AUDIO_ENVELOPE_BINS];
 uint16_t audioEnvelopeCount = 0;
+uint16_t jobSegmentsReady = 0;
+uint16_t jobSegmentsTotal = 0;
+bool jobStreamComplete = false;
+bool jobPcmStreamReady = false;
+bool jobPcmStreamComplete = false;
 
 String statusText = "STARTING";
 String faceState = "idle";
@@ -90,6 +97,11 @@ unsigned long lastBlinked = 0;
 unsigned long wakeCooldownUntil = 0;
 bool previousInterruptionWake = false;
 unsigned long interruptionIgnoreUntil = 0;
+volatile bool pcmFaceRunning = false;
+volatile uint8_t pcmFaceAmplitude = 0;
+TaskHandle_t pcmFaceTaskHandle = nullptr;
+constexpr bool PCM_MOUTH_ANIMATION = true;
+uint8_t mouthFrameFromAudio(uint8_t amplitude, uint8_t previousAmplitude);
 
 uint32_t faceFillColor(const String &state) {
     if (state == "error") return FACE_ERROR;
@@ -235,6 +247,23 @@ void drawCaption(const String &caption) {
                           WHITE, k10.canvas->eCNAndENFont16, 210, false);
 }
 
+void drawRoundedRect(int x, int y, int width, int height, int radius,
+                     uint32_t fill) {
+    k10.canvas->canvasRectangle(x + radius, y, width - radius * 2,
+                                height, fill, fill, true);
+    k10.canvas->canvasRectangle(x, y + radius, width, height - radius * 2,
+                                fill, fill, true);
+    k10.canvas->canvasCircle(x + radius, y + radius, radius,
+                             fill, fill, true);
+    k10.canvas->canvasCircle(x + width - radius - 1, y + radius, radius,
+                             fill, fill, true);
+    k10.canvas->canvasCircle(x + radius, y + height - radius - 1, radius,
+                             fill, fill, true);
+    k10.canvas->canvasCircle(x + width - radius - 1,
+                             y + height - radius - 1, radius,
+                             fill, fill, true);
+}
+
 void drawMouth(const String &state, uint8_t mouthFrame) {
     (void)state;
     if (mouthFrame == 0) {
@@ -255,8 +284,8 @@ void drawMouth(const String &state, uint8_t mouthFrame) {
         k10.canvas->canvasCircle(120, 208, 5, MOUTH_WINE, MOUTH_WINE, true);
         k10.canvas->canvasLine(113, 214, 127, 214, FACE_GOLD);
     } else if (mouthFrame == 3) {
-        k10.canvas->canvasRectangle(99, 195, 42, 25, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasRectangle(105, 201, 30, 13, MOUTH_WINE, MOUTH_WINE, true);
+        drawRoundedRect(99, 195, 42, 25, 6, OUTLINE);
+        drawRoundedRect(105, 201, 30, 13, 4, MOUTH_WINE);
         k10.canvas->canvasLine(108, 215, 132, 215, FACE_GOLD);
     } else if (mouthFrame == 4) {
         k10.canvas->canvasCircle(120, 207, 12, OUTLINE, OUTLINE, true);
@@ -320,6 +349,41 @@ void face(const String &state, const String &caption, bool blink = false,
     digital_write(eLCD_BLK, 1);
     k10.canvas->updateCanvas();
     lastRedraw = millis();
+}
+
+void pcmFaceAnimationTask(void *) {
+    uint8_t previousAmplitude = 0;
+    while (pcmFaceRunning) {
+        uint8_t amplitude = pcmFaceAmplitude;
+        uint8_t frame = mouthFrameFromAudio(amplitude, previousAmplitude);
+        face("speaking", "ARLO speaking", false, frame);
+        previousAmplitude = amplitude;
+        vTaskDelay(pdMS_TO_TICKS(90));
+    }
+    pcmFaceTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+bool startPcmFaceAnimation() {
+    if (!PCM_MOUTH_ANIMATION || pcmFaceTaskHandle) return true;
+    pcmFaceRunning = true;
+    pcmFaceAmplitude = 0;
+    BaseType_t result = xTaskCreate(
+        pcmFaceAnimationTask, "pcm_face", 4096, nullptr, 0,
+        &pcmFaceTaskHandle);
+    if (result != pdPASS) {
+        pcmFaceRunning = false;
+        pcmFaceTaskHandle = nullptr;
+        Serial.println("PCM face task creation failed");
+        return false;
+    }
+    return true;
+}
+
+void stopPcmFaceAnimation() {
+    if (!pcmFaceTaskHandle) return;
+    pcmFaceRunning = false;
+    while (pcmFaceTaskHandle) delay(1);
 }
 
 void initDisplay() {
@@ -565,6 +629,8 @@ bool recordUntilSpeechEnds() {
 
 // POST WAV by streaming from microSD, without allocating the whole audio in RAM.
 String createJob() {
+    Serial.printf("POST preflight wifi=%d rssi=%d ip=%s\n",
+                  (int)WiFi.status(), WiFi.RSSI(), WiFi.localIP().toString().c_str());
     for (uint8_t attempt = 1; attempt <= 3; ++attempt) {
         File audio = SD.open(INPUT_WAV, FILE_READ);
         if (!audio || audio.size() < MIN_WAV_BYTES) {
@@ -577,7 +643,7 @@ String createJob() {
         http.setReuse(false);
         http.useHTTP10(true);
         http.setConnectTimeout(10000);
-        http.setTimeout(30000);
+        http.setTimeout(60000);
         setCommonHeaders(http);
         http.addHeader("Content-Type", "audio/wav");
         int status = http.sendRequest("POST", &audio, audio.size());
@@ -586,6 +652,15 @@ String createJob() {
         Serial.printf("POST /turn attempt=%u -> %d %s\n",
                       attempt, status, payload.c_str());
         http.end();
+        if (status < 0) {
+            Serial.printf("POST transport error=%d wifi=%d rssi=%d ip=%s\n",
+                          status, (int)WiFi.status(), WiFi.RSSI(),
+                          WiFi.localIP().toString().c_str());
+            WiFi.disconnect(false);
+            lastWiFiAttempt = 0;
+            connectWifi();
+            delay(1000);
+        }
         if (status == 202) {
             DynamicJsonDocument doc(1024);
             if (!deserializeJson(doc, payload)) return doc["id"].as<String>();
@@ -598,7 +673,8 @@ String createJob() {
 }
 
 // Polling lets us animate while Hermes/Whisper/TTS are running on the PC.
-String pollJob(const String &id) {
+String pollJob(const String &id, uint16_t wantedSegment = 0,
+                bool allowPcmStream = true) {
     unsigned long start = millis();
     while (millis() - start < JOB_TIMEOUT_MS) {
         if (checkWakeInterruption()) {
@@ -613,17 +689,46 @@ String pollJob(const String &id) {
         setCommonHeaders(http);
         int code = http.GET();
         if (code == 200) {
-            DynamicJsonDocument doc(1536);
+            DynamicJsonDocument doc(4096);
             String response = http.getString();
-            if (deserializeJson(doc, response) == DeserializationError::Ok) {
+            DeserializationError parseError = deserializeJson(doc, response);
+            if (parseError == DeserializationError::Ok) {
                 String state = doc["state"].as<String>();
+                jobSegmentsReady = doc["segments_ready"] | 0;
+                jobSegmentsTotal = doc["segments_total"] | 0;
+                jobStreamComplete = doc["stream_complete"] | false;
+                jobPcmStreamReady = doc["pcm_stream_ready"] | false;
+                jobPcmStreamComplete = doc["pcm_stream_complete"] | false;
+                if (allowPcmStream && jobPcmStreamReady && wantedSegment == 0) {
+                    http.end();
+                    return "pcm_streaming";
+                }
+                if (jobSegmentsReady == 0 &&
+                    (state == "ready" || state == "conversation_end")) {
+                    // Keep compatibility with bridges that still expose one
+                    // complete /audio file instead of sentence segments.
+                    jobSegmentsReady = 1;
+                    jobSegmentsTotal = 1;
+                    jobStreamComplete = true;
+                }
+                if (jobSegmentsReady > wantedSegment) {
+                    http.end();
+                    return state;
+                }
                 if (state == "ready" || state == "no_speech" || state == "conversation_end" || state == "error") {
                     if (state == "error") Serial.println(doc["error"].as<String>());
                     Serial.printf("Job terminal state=%s\n", state.c_str());
                     http.end();
                     return state;
                 }
-                face("thinking", state + "...", false, 0);
+                // Once playback has started, keep the speaking face while we
+                // wait for the next streamed segment to become available.
+                if (wantedSegment == 0) {
+                    face("thinking", state + "...", false, 0);
+                }
+            } else {
+                Serial.printf("GET /jobs parse failed: %s bytes=%u\n",
+                              parseError.c_str(), (unsigned)response.length());
             }
         } else {
             Serial.printf("GET status -> %d\n", code);
@@ -634,7 +739,7 @@ String pollJob(const String &id) {
     return "error";
 }
 
-bool fetchAudio(const String &id) {
+bool fetchAudio(const String &id, uint16_t segment = 0) {
     const uint8_t maxAttempts = 3;
     for (uint8_t attempt = 1; attempt <= maxAttempts; ++attempt) {
         bool removed = SD.remove(OUTPUT_WAV);
@@ -654,7 +759,8 @@ bool fetchAudio(const String &id) {
         }
 
         HTTPClient http;
-        http.begin(String(BRIDGE_BASE_URL) + "/jobs/" + id + "/audio");
+        http.begin(String(BRIDGE_BASE_URL) + "/jobs/" + id +
+                   "/audio?segment=" + String(segment));
         http.setReuse(false);
         http.useHTTP10(true);
         http.setConnectTimeout(10000);
@@ -787,6 +893,16 @@ bool buildAudioEnvelope() {
                       (static_cast<uint64_t>(frameIndex) * AUDIO_ENVELOPE_BINS) /
                       totalFrames));
     if (audioEnvelopeCount == 0) audioEnvelopeCount = 1;
+    uint32_t peakAverage = 1;
+    for (uint16_t i = 0; i < audioEnvelopeCount; ++i) {
+        uint32_t start = (static_cast<uint64_t>(i) * totalFrames) /
+                         AUDIO_ENVELOPE_BINS;
+        uint32_t end = (static_cast<uint64_t>(i + 1) * totalFrames) /
+                       AUDIO_ENVELOPE_BINS;
+        uint32_t framesInBin = max<uint32_t>(1, end - start);
+        peakAverage = max<uint32_t>(peakAverage,
+                                    audioEnvelopeSum[i] / framesInBin);
+    }
     for (uint16_t i = 0; i < audioEnvelopeCount; ++i) {
         uint32_t start = (static_cast<uint64_t>(i) * totalFrames) /
                          AUDIO_ENVELOPE_BINS;
@@ -795,7 +911,7 @@ bool buildAudioEnvelope() {
         uint32_t framesInBin = max<uint32_t>(1, end - start);
         uint32_t average = audioEnvelopeSum[i] / framesInBin;
         audioEnvelope[i] = static_cast<uint8_t>(min<uint32_t>(
-            255, (average * 255U) / 32767U));
+            255, (average * 255U) / peakAverage));
     }
     return frameIndex == totalFrames;
 }
@@ -830,11 +946,386 @@ void settleMouthAfterPlayback(uint8_t mouthFrame) {
     }
 }
 
+constexpr size_t PCM_RING_BYTES = 512 * 1024;
+// Native CUDA chunks arrive in bursts. Keep roughly four seconds of decoded
+// stereo PCM before opening I2S so chunk-level compute jitter is not audible.
+constexpr size_t PCM_PREFILL_BYTES = 256 * 1024;
+// Keep the PCM contract at 16 kHz. The prior 17.66 kHz calibration raised
+// pitch noticeably; the remaining elapsed-time excess is producer pacing, not
+// a reason to alter the audio pitch.
+constexpr uint32_t PCM_I2S_PLAYBACK_RATE = 16000;
+constexpr uint32_t PCM_I2S_IDLE_RATE = 16000;
+constexpr unsigned long PCM_STREAM_TIMEOUT_MS = 60000UL;
+// Optional one-shot isolation mode; production PCM uses direct I2S.
+constexpr bool PCM_DIAGNOSTIC_USE_SDK_PLAYBACK = false;
+
+struct PcmStreamContext {
+    String jobId;
+    RingbufHandle_t ring = nullptr;
+    uint8_t *ringStorage = nullptr;
+    StaticRingbuffer_t ringControl{};
+    volatile bool finished = false;
+    volatile bool failed = false;
+    volatile size_t buffered = 0;
+    volatile size_t downloaded = 0;
+    volatile size_t minBuffered = SIZE_MAX;
+    volatile size_t maxBuffered = 0;
+    volatile uint32_t emptyReads = 0;
+    volatile uint32_t blockedReceives = 0;
+    volatile uint32_t maxReceiveWaitMs = 0;
+    volatile uint32_t totalReceiveWaitMs = 0;
+    volatile uint32_t i2sWrites = 0;
+    volatile uint32_t i2sPartialWrites = 0;
+    volatile uint32_t maxI2sWriteMs = 0;
+    volatile uint32_t totalI2sWriteMs = 0;
+    volatile size_t i2sRequestedBytes = 0;
+    volatile size_t i2sWrittenBytes = 0;
+    unsigned long playbackStartedMs = 0;
+    unsigned long playbackFinishedMs = 0;
+    int httpStatus = 0;
+};
+
+class PcmRingWriter : public Stream {
+public:
+    explicit PcmRingWriter(PcmStreamContext *context) : context_(context) {}
+
+    size_t write(uint8_t value) override {
+        return write(&value, 1);
+    }
+
+    size_t write(const uint8_t *data, size_t length) override {
+        size_t consumed = 0;
+        if (partialLength_ > 0) {
+            size_t needed = 4 - partialLength_;
+            size_t copied = min(needed, length);
+            memcpy(partial_ + partialLength_, data, copied);
+            partialLength_ += copied;
+            consumed += copied;
+            if (partialLength_ == 4) {
+                if (!push(partial_, sizeof(partial_))) return 0;
+                partialLength_ = 0;
+            }
+        }
+
+        size_t remaining = length - consumed;
+        size_t aligned = remaining - (remaining % 4);
+        if (aligned > 0) {
+            if (!push(data + consumed, aligned)) return 0;
+            consumed += aligned;
+        }
+        size_t tail = length - consumed;
+        if (tail > 0) {
+            memcpy(partial_, data + consumed, tail);
+            partialLength_ = tail;
+            consumed += tail;
+        }
+        return consumed;
+    }
+
+    int available() override { return 0; }
+    int read() override { return -1; }
+    int peek() override { return -1; }
+    void flush() override {}
+
+    bool hasPartialFrame() const { return partialLength_ != 0; }
+
+private:
+    bool push(const uint8_t *data, size_t length) {
+        if (xRingbufferSend(context_->ring, data, length,
+                            pdMS_TO_TICKS(1000)) != pdTRUE) {
+            context_->failed = true;
+            Serial.println("PCM stream ring buffer full/blocked");
+            return false;
+        }
+        context_->buffered += length;
+        context_->downloaded += length;
+        if (context_->buffered > context_->maxBuffered) {
+            context_->maxBuffered = context_->buffered;
+        }
+        return true;
+    }
+
+    PcmStreamContext *context_;
+    uint8_t partial_[4] = {0, 0, 0, 0};
+    size_t partialLength_ = 0;
+};
+
+void pcmDownloadTask(void *parameter) {
+    PcmStreamContext *context = static_cast<PcmStreamContext *>(parameter);
+    HTTPClient http;
+    http.begin(String(BRIDGE_BASE_URL) + "/jobs/" + context->jobId + "/pcm");
+    http.setReuse(false);
+    http.useHTTP10(true);
+    http.setConnectTimeout(10000);
+    http.setTimeout(5000);
+    setCommonHeaders(http);
+    int status = http.GET();
+    context->httpStatus = status;
+    if (status != 200) {
+        context->failed = true;
+        Serial.printf("PCM stream HTTP status=%d\n", status);
+        http.end();
+        context->finished = true;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    PcmRingWriter writer(context);
+    int decodedBytes = http.writeToStream(&writer);
+    if (decodedBytes < 0 || writer.hasPartialFrame()) {
+        context->failed = true;
+        Serial.printf("PCM stream decode failed result=%d partial=%d\n",
+                      decodedBytes, writer.hasPartialFrame() ? 1 : 0);
+    }
+    http.end();
+    context->finished = true;
+    Serial.printf("PCM stream download bytes=%u failed=%d\n",
+                  (unsigned)context->downloaded, context->failed ? 1 : 0);
+    vTaskDelete(nullptr);
+}
+
+uint8_t pcmAmplitude(const uint8_t *data, size_t bytes) {
+    if (!data || bytes < 4) return 0;
+    uint64_t total = 0;
+    size_t frames = bytes / 4;
+    for (size_t offset = 0; offset + 3 < bytes; offset += 4) {
+        int32_t left = static_cast<int16_t>(
+            static_cast<uint16_t>(data[offset]) |
+            (static_cast<uint16_t>(data[offset + 1]) << 8));
+        int32_t right = static_cast<int16_t>(
+            static_cast<uint16_t>(data[offset + 2]) |
+            (static_cast<uint16_t>(data[offset + 3]) << 8));
+        if (left < 0) left = -left;
+        if (right < 0) right = -right;
+        total += static_cast<uint32_t>((left + right) / 2);
+    }
+    return static_cast<uint8_t>(min<uint64_t>(255, total / max<size_t>(1, frames) / 128));
+}
+
+bool writeFileFully(File &file, const uint8_t *data, size_t length) {
+    size_t writtenTotal = 0;
+    while (writtenTotal < length) {
+        size_t written = file.write(data + writtenTotal, length - writtenTotal);
+        if (written == 0) return false;
+        writtenTotal += written;
+    }
+    return true;
+}
+
+void playback();
+
+bool playPcmStream(const String &id, size_t &playedBytes) {
+    playedBytes = 0;
+    PcmStreamContext context;
+    context.jobId = id;
+    context.ringStorage = static_cast<uint8_t *>(heap_caps_malloc(
+        PCM_RING_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!context.ringStorage) {
+        Serial.println("PCM stream PSRAM ring allocation failed");
+        return false;
+    }
+    context.ring = xRingbufferCreateStatic(
+        PCM_RING_BYTES, RINGBUF_TYPE_BYTEBUF, context.ringStorage,
+        &context.ringControl);
+    if (!context.ring) {
+        heap_caps_free(context.ringStorage);
+        context.ringStorage = nullptr;
+        Serial.println("PCM stream ring creation failed");
+        return false;
+    }
+    BaseType_t taskResult = xTaskCreate(
+        pcmDownloadTask, "pcm_download", 16384, &context, 3, nullptr);
+    if (taskResult != pdPASS) {
+        vRingbufferDelete(context.ring);
+        heap_caps_free(context.ringStorage);
+        context.ring = nullptr;
+        context.ringStorage = nullptr;
+        Serial.println("PCM stream task creation failed");
+        return false;
+    }
+
+    unsigned long prefillStarted = millis();
+    while (!context.finished && context.buffered < PCM_PREFILL_BYTES &&
+           millis() - prefillStarted < 15000UL) {
+        delay(5);
+    }
+    if (context.buffered == 0 && context.finished) {
+        Serial.printf("PCM stream had no audio status=%d\n", context.httpStatus);
+        vRingbufferDelete(context.ring);
+        heap_caps_free(context.ringStorage);
+        context.ring = nullptr;
+        context.ringStorage = nullptr;
+        return false;
+    }
+
+    Serial.printf("PCM playback start buffered=%u downloaded=%u\n",
+                  (unsigned)context.buffered, (unsigned)context.downloaded);
+    context.playbackStartedMs = millis();
+    context.minBuffered = context.buffered;
+    face("speaking", "ARLO speaking", false, 0);
+    startPcmFaceAnimation();
+    File diagnosticWav;
+    uint32_t diagnosticBytes = 0;
+    if (PCM_DIAGNOSTIC_USE_SDK_PLAYBACK) {
+        SD.remove(OUTPUT_WAV);
+        diagnosticWav = SD.open(OUTPUT_WAV, FILE_WRITE);
+        if (!diagnosticWav) {
+            Serial.println("PCM diagnostic WAV open failed");
+            context.failed = true;
+        } else {
+            uint8_t header[44];
+            fillWavHeader(header, 0);
+            if (!writeFileFully(diagnosticWav, header, sizeof(header))) {
+                Serial.println("PCM diagnostic WAV header write failed");
+                context.failed = true;
+            }
+        }
+    } else {
+        xSemaphoreTake(xI2SMutex, portMAX_DELAY);
+        esp_err_t clockResult = i2s_set_sample_rates(
+            I2S_NUM_0, PCM_I2S_PLAYBACK_RATE);
+        Serial.printf("PCM I2S playback clock requested=%u actual=%u result=%d\n",
+                      (unsigned)PCM_I2S_PLAYBACK_RATE,
+                      (unsigned)i2s_get_clk(I2S_NUM_0), (int)clockResult);
+        i2s_zero_dma_buffer(I2S_NUM_0);
+    }
+    unsigned long lastData = millis();
+    unsigned long nextMouthUpdate = millis();
+    uint8_t mouthFrame = 0;
+    uint8_t previousAmplitude = 0;
+    while (!context.finished || context.buffered > 0) {
+        size_t itemSize = 0;
+        unsigned long receiveStarted = millis();
+        uint8_t *item = static_cast<uint8_t *>(xRingbufferReceiveUpTo(
+            context.ring, &itemSize, pdMS_TO_TICKS(100), 8192));
+        unsigned long receiveWait = millis() - receiveStarted;
+        if (receiveWait > 0) {
+            context.totalReceiveWaitMs += receiveWait;
+            if (receiveWait > context.maxReceiveWaitMs) {
+                context.maxReceiveWaitMs = receiveWait;
+            }
+            if (receiveWait >= 2) context.blockedReceives++;
+        }
+        if (!item || itemSize == 0) {
+            context.emptyReads++;
+            if (context.finished && context.buffered == 0) break;
+            if (millis() - lastData > 10000UL) {
+                context.failed = true;
+                Serial.println("PCM stream playback underrun/timeout");
+                break;
+            }
+            continue;
+        }
+        size_t written = 0;
+        esp_err_t result = ESP_OK;
+        if (PCM_DIAGNOSTIC_USE_SDK_PLAYBACK) {
+            xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+            bool writeOk = writeFileFully(diagnosticWav, item, itemSize);
+            xSemaphoreGive(xSPIlMutex);
+            written = writeOk ? itemSize : 0;
+            diagnosticBytes += written;
+        } else {
+            unsigned long i2sStarted = millis();
+            result = i2s_write(I2S_NUM_0, item, itemSize, &written,
+                               pdMS_TO_TICKS(2000));
+            unsigned long i2sWait = millis() - i2sStarted;
+            context.totalI2sWriteMs += i2sWait;
+            if (i2sWait > context.maxI2sWriteMs) {
+                context.maxI2sWriteMs = i2sWait;
+            }
+        }
+        uint8_t amplitude = pcmAmplitude(item, itemSize);
+        vRingbufferReturnItem(context.ring, item);
+        context.buffered -= itemSize;
+        if (context.buffered < context.minBuffered) {
+            context.minBuffered = context.buffered;
+        }
+        context.i2sWrites++;
+        context.i2sRequestedBytes += itemSize;
+        context.i2sWrittenBytes += written;
+        if (written != itemSize) context.i2sPartialWrites++;
+        if (!PCM_DIAGNOSTIC_USE_SDK_PLAYBACK &&
+            (result != ESP_OK || written != itemSize)) {
+            context.failed = true;
+            Serial.printf("PCM stream I2S write failed err=%d wrote=%u/%u\n",
+                          (int)result, (unsigned)written, (unsigned)itemSize);
+            while (!context.finished) {
+                size_t discardedSize = 0;
+                uint8_t *discarded = static_cast<uint8_t *>(xRingbufferReceiveUpTo(
+                    context.ring, &discardedSize, pdMS_TO_TICKS(100), 8192));
+                if (discarded) {
+                    vRingbufferReturnItem(context.ring, discarded);
+                    context.buffered -= discardedSize;
+                }
+            }
+            break;
+        }
+        playedBytes += written;
+        lastData = millis();
+        if (PCM_MOUTH_ANIMATION) {
+            pcmFaceAmplitude = amplitude;
+        }
+    }
+    while (!context.finished) delay(10);
+    stopPcmFaceAnimation();
+    context.playbackFinishedMs = millis();
+    unsigned long elapsed = context.playbackFinishedMs - context.playbackStartedMs;
+    unsigned long expected = static_cast<unsigned long>(
+        (static_cast<uint64_t>(playedBytes) * 1000ULL) / 64000ULL);
+    Serial.printf("PCM playback stats played=%u expected_ms=%lu elapsed_ms=%lu min_buffer=%u max_buffer=%u empty_reads=%u blocked_receives=%u receive_wait_ms=%u max_receive_wait_ms=%u writes=%u partial=%u requested=%u written=%u i2s_wait_ms=%u max_i2s_wait_ms=%u\n",
+                  (unsigned)playedBytes, expected, elapsed,
+                  (unsigned)context.minBuffered, (unsigned)context.maxBuffered,
+                  (unsigned)context.emptyReads, (unsigned)context.blockedReceives,
+                  (unsigned)context.totalReceiveWaitMs,
+                  (unsigned)context.maxReceiveWaitMs,
+                  (unsigned)context.i2sWrites,
+                  (unsigned)context.i2sPartialWrites,
+                  (unsigned)context.i2sRequestedBytes,
+                  (unsigned)context.i2sWrittenBytes,
+                  (unsigned)context.totalI2sWriteMs,
+                  (unsigned)context.maxI2sWriteMs);
+    if (PCM_DIAGNOSTIC_USE_SDK_PLAYBACK && diagnosticWav) {
+        uint8_t header[44];
+        fillWavHeader(header, diagnosticBytes);
+        xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+        diagnosticWav.seek(0);
+        bool headerOk = writeFileFully(diagnosticWav, header, sizeof(header));
+        diagnosticWav.close();
+        xSemaphoreGive(xSPIlMutex);
+        if (!headerOk) {
+            context.failed = true;
+            Serial.println("PCM diagnostic WAV final header write failed");
+        }
+        Serial.printf("PCM diagnostic WAV ready bytes=%u; using SDK playback\n",
+                      (unsigned)diagnosticBytes);
+        playback();
+    }
+    bool success = !context.failed && playedBytes > 0 && context.downloaded > 0;
+    if (!PCM_DIAGNOSTIC_USE_SDK_PLAYBACK) {
+        esp_err_t idleClockResult = i2s_set_sample_rates(
+            I2S_NUM_0, PCM_I2S_IDLE_RATE);
+        Serial.printf("PCM I2S idle clock requested=%u actual=%u result=%d\n",
+                      (unsigned)PCM_I2S_IDLE_RATE,
+                      (unsigned)i2s_get_clk(I2S_NUM_0), (int)idleClockResult);
+        xSemaphoreGive(xI2SMutex);
+    }
+    vRingbufferDelete(context.ring);
+    heap_caps_free(context.ringStorage);
+    context.ring = nullptr;
+    context.ringStorage = nullptr;
+    if (success) {
+        settleMouthAfterPlayback(mouthFrame);
+        Serial.printf("PCM stream playback complete bytes=%u\n", (unsigned)playedBytes);
+    } else {
+        Serial.printf("PCM stream playback failed bytes=%u downloaded=%u\n",
+                      (unsigned)playedBytes, (unsigned)context.downloaded);
+    }
+    return success;
+}
 void playback() {
     if (!SD.exists(OUTPUT_WAV)) return;
     unsigned long expectedMs = outputWavDurationMs();
     unsigned long minimumPlaybackMs = expectedMs + 750UL;
-    unsigned long timeoutMs = max(minimumPlaybackMs + 15000UL, 30000UL);
     Serial.printf("Playback WAV duration=%lu ms minimum=%lu ms\n",
                   expectedMs, minimumPlaybackMs);
     bool envelopeReady = buildAudioEnvelope();
@@ -843,63 +1334,37 @@ void playback() {
     face("speaking", "ARLO speaking", false, 0);
     music.playTFCardAudio("S:/arlo-reply.wav");
 
-    // Follow the SDK playback task, but also enforce the WAV duration. The SDK
-    // can report idle early, and starting recording immediately would make the
-    // next listening turn compete with the tail of the current response.
+    // The K10 SDK's getPlayMusicState() can block while its playback task owns
+    // the audio/SPI resources. Use the WAV duration as the completion signal
+    // instead of polling that state from the main loop. This keeps the face
+    // responsive and guarantees that the conversation state can advance.
     unsigned long began = millis();
     unsigned long nextMouthUpdate = began;
-    unsigned long audioStartedAt = began;
-    bool started = false;
     uint8_t mouthFrame = 0;
-    while (millis() - began < timeoutMs) {
-        bool playing = k10.getPlayMusicState() != 0;
-        if (playing && !started) {
-            started = true;
-            audioStartedAt = millis();
-        }
-
-        unsigned long elapsed = millis() - began;
-        bool sdkFinished = started && !playing;
-        bool durationFinished = elapsed >= minimumPlaybackMs;
-        if ((sdkFinished && durationFinished) ||
-            (!started && durationFinished && expectedMs == 0)) {
-            break;
-        }
-        if (!started && elapsed > 3000 && expectedMs == 0) {
-            Serial.println("Playback task did not start");
-            break;
-        }
-
+    while (millis() - began < minimumPlaybackMs) {
         unsigned long now = millis();
         if (now >= nextMouthUpdate) {
             uint8_t nextFrame = 0;
-            if (started && expectedMs > 0 && envelopeReady &&
-                audioEnvelopeCount > 0) {
-                unsigned long audioElapsed = now - audioStartedAt;
+            if (expectedMs > 0 && envelopeReady && audioEnvelopeCount > 0) {
                 uint16_t index = static_cast<uint16_t>(min<uint64_t>(
                     audioEnvelopeCount - 1,
-                    (static_cast<uint64_t>(audioElapsed) * audioEnvelopeCount) /
+                    (static_cast<uint64_t>(now - began) * audioEnvelopeCount) /
                     expectedMs));
                 uint8_t previousAmplitude = index > 0
                     ? audioEnvelope[index - 1]
                     : audioEnvelope[index];
                 nextFrame = mouthFrameFromAudio(audioEnvelope[index],
                                                  previousAmplitude);
-            } else if (started && !envelopeReady) {
-                nextFrame = static_cast<uint8_t>(((now - audioStartedAt) / 260UL) % 5);
             }
             mouthFrame = nextFrame;
-            // This call also advances the speaking gaze every 900 ms, even
-            // when the audio envelope stays in the same mouth band.
             face("speaking", "ARLO speaking", false, mouthFrame);
-            nextMouthUpdate = now + 45;
+            nextMouthUpdate = now + 90;
         }
         delay(25);
     }
-    if (millis() - began >= timeoutMs && k10.getPlayMusicState() != 0) {
-        Serial.println("Playback timeout; stopping stuck audio task");
-        music.stopPlayAudio();
-    }
+    music.stopPlayAudio();
+    Serial.printf("Playback duration wait complete elapsed=%lu ms\n",
+                  millis() - began);
     settleMouthAfterPlayback(mouthFrame);
 }
 
@@ -916,39 +1381,96 @@ bool voiceTurn(bool followup) {
         delay(2000);
         return false;
     }
-    String outcome = pollJob(job);
+    jobSegmentsReady = 0;
+    jobSegmentsTotal = 0;
+    jobStreamComplete = false;
+    jobPcmStreamReady = false;
+    jobPcmStreamComplete = false;
+    String outcome = pollJob(job, 0);
     if (outcome == "interrupted") {
         face("listening", "Interrupted - listening");
         return false;
-    }
-    if (outcome == "conversation_end") {
-        face("thinking", "Saying goodbye...");
-        if (!fetchAudio(job)) {
-            face("error", "Goodbye audio failed");
-            delay(2000);
-            return false;
-        }
-        playback();
-        face("idle", "Talk to you later");
-        Serial.println("Conversation ended by explicit phrase");
-        return true;
     }
     if (outcome == "no_speech") {
         face("idle", "Say Jarvis to talk");
         return false;
     }
-    if (outcome != "ready") {
+    if (outcome != "pcm_streaming" && outcome != "streaming" &&
+        outcome != "ready" && outcome != "conversation_end") {
         face("error", "Bridge error - see USB");
         delay(2000);
         return false;
     }
-    face("thinking", "Getting voice...");
-    if (!fetchAudio(job)) {
-        face("error", "Download failed");
-        delay(2000);
+    bool conversationEnded = outcome == "conversation_end";
+    uint16_t segment = 0;
+    if (outcome == "pcm_streaming") {
+        size_t playedBytes = 0;
+        bool streamed = playPcmStream(job, playedBytes);
+        if (streamed) {
+            String terminal = pollJob(job, 0);
+            if (terminal == "interrupted") {
+                face("listening", "Interrupted - listening");
+                return false;
+            }
+            conversationEnded = terminal == "conversation_end";
+            if (conversationEnded) {
+                face("idle", "Talk to you later");
+                Serial.println("Conversation ended by explicit phrase");
+                return true;
+            }
+            return false;
+        }
+        if (playedBytes > 0) {
+            face("error", "PCM stream interrupted");
+            delay(2000);
+            return false;
+        }
+        // No PCM reached I2S. Continue through the complete-WAV fallback.
+        outcome = pollJob(job, 0, false);
+    }
+    if (outcome == "interrupted") {
+        face("listening", "Interrupted - listening");
         return false;
     }
-    playback();
+
+    while (true) {
+        if (segment >= jobSegmentsReady) {
+            outcome = pollJob(job, segment);
+            if (outcome == "interrupted") {
+                face("listening", "Interrupted - listening");
+                return false;
+            }
+            if (outcome == "no_speech" || outcome == "error") {
+                face("error", "Bridge error - see USB");
+                delay(2000);
+                return false;
+            }
+            conversationEnded = conversationEnded || outcome == "conversation_end";
+        }
+        if (segment >= jobSegmentsReady) {
+            face("error", "No sentence audio");
+            delay(2000);
+            return false;
+        }
+        // Keep the speaking face between streamed segments. Switching to the
+        // thinking face here causes a visible flash before the next clip.
+        if (segment == 0) {
+            face("thinking", "Getting voice...");
+        }
+        if (!fetchAudio(job, segment)) {
+            face("error", "Download failed");
+            delay(2000);
+            return false;
+        }
+        playback();
+        ++segment;
+        if (jobStreamComplete && segment >= jobSegmentsTotal) break;
+    }
+    if (conversationEnded) {
+        face("idle", "Talk to you later");
+        Serial.println("Conversation ended by explicit phrase");
+        return true;
+    }
     return false;
 }
 
