@@ -93,6 +93,17 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "for (uint8_t minute = 0; minute < 60; ++minute)" in source
     assert "minute % 5 == 0" in source
     assert "const int starts[][2]" not in source
+    assert "PCM_FACE_UPDATE_MS = 45" in source
+    assert "PCM_FACE_WINDOW_FRAMES = 320" in source
+    assert "PCM_FACE_WINDOW_BYTES = PCM_FACE_WINDOW_FRAMES * 4" in source
+    assert "PCM_FACE_HEADROOM = 0.70f" in source
+    assert "PCM_FACE_NOISE_GATE = 8" in source
+    assert "pcmFaceSamplePosition" in source
+    assert "pcmFaceEnvelopeSequence" in source
+    assert "pcmUpdateAmplitude(item + itemOffset, written" in source
+    assert "settleMouthAfterPlayback(pcmFaceFrame);" in source
+    assert "uint8_t amplitude = pcmAmplitude(item, itemSize);" not in source
+    assert "vTaskDelay(pdMS_TO_TICKS(90));" not in source
 
 
 def test_wide_open_mouth_uses_rounded_rectangles():

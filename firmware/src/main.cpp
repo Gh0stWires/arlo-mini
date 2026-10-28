@@ -99,8 +99,31 @@ bool previousInterruptionWake = false;
 unsigned long interruptionIgnoreUntil = 0;
 volatile bool pcmFaceRunning = false;
 volatile uint8_t pcmFaceAmplitude = 0;
+volatile uint8_t pcmFaceFrame = 0;
+volatile uint32_t pcmFaceSamplePosition = 0;
+volatile uint32_t pcmFaceEnvelopeSequence = 0;
 TaskHandle_t pcmFaceTaskHandle = nullptr;
 constexpr bool PCM_MOUTH_ANIMATION = true;
+// Keep the visual cadence close to the original face animation while the
+// audio consumer remains responsible only for I2S and envelope publishing.
+constexpr uint32_t PCM_FACE_UPDATE_MS = 45;
+constexpr uint16_t PCM_FACE_WINDOW_FRAMES = 320;  // 20 ms at 16 kHz
+constexpr size_t PCM_FACE_WINDOW_BYTES = PCM_FACE_WINDOW_FRAMES * 4;
+// These values are intentionally configurable and are calibrated against
+// real Chatterbox output in tools/benchmark_pcm_amplitude.py.
+constexpr float PCM_FACE_INITIAL_NOISE_FLOOR = 96.0f;
+constexpr float PCM_FACE_MIN_NOISE_FLOOR = 32.0f;
+constexpr float PCM_FACE_NOISE_FLOOR_FALL = 0.10f;
+constexpr float PCM_FACE_NOISE_FLOOR_RISE = 0.003f;
+constexpr float PCM_FACE_INITIAL_PEAK = 512.0f;
+constexpr float PCM_FACE_PEAK_DECAY = 0.999f;
+constexpr float PCM_FACE_ATTACK = 0.55f;
+constexpr float PCM_FACE_RELEASE = 0.25f;
+// Leave measured headroom so the rise/fall step does not turn every loud
+// consonant into frame 4. This was selected by the repository benchmark, not
+// by multiplying the raw amplitude after the fact.
+constexpr float PCM_FACE_HEADROOM = 0.70f;
+constexpr uint8_t PCM_FACE_NOISE_GATE = 8;
 uint8_t mouthFrameFromAudio(uint8_t amplitude, uint8_t previousAmplitude);
 
 uint32_t faceFillColor(const String &state) {
@@ -353,12 +376,27 @@ void face(const String &state, const String &caption, bool blink = false,
 
 void pcmFaceAnimationTask(void *) {
     uint8_t previousAmplitude = 0;
+    uint32_t lastSamplePosition = UINT32_MAX;
     while (pcmFaceRunning) {
-        uint8_t amplitude = pcmFaceAmplitude;
-        uint8_t frame = mouthFrameFromAudio(amplitude, previousAmplitude);
-        face("speaking", "ARLO speaking", false, frame);
-        previousAmplitude = amplitude;
-        vTaskDelay(pdMS_TO_TICKS(90));
+        uint8_t amplitude = 0;
+        uint32_t samplePosition = 0;
+        uint32_t sequenceStart = 0;
+        uint32_t sequenceEnd = 0;
+        do {
+            sequenceStart = pcmFaceEnvelopeSequence;
+            amplitude = pcmFaceAmplitude;
+            samplePosition = pcmFaceSamplePosition;
+            sequenceEnd = pcmFaceEnvelopeSequence;
+        } while (sequenceStart != sequenceEnd || (sequenceStart & 1U));
+
+        if (samplePosition != lastSamplePosition) {
+            uint8_t frame = mouthFrameFromAudio(amplitude, previousAmplitude);
+            pcmFaceFrame = frame;
+            face("speaking", "ARLO speaking", false, frame);
+            previousAmplitude = amplitude;
+            lastSamplePosition = samplePosition;
+        }
+        vTaskDelay(pdMS_TO_TICKS(PCM_FACE_UPDATE_MS));
     }
     pcmFaceTaskHandle = nullptr;
     vTaskDelete(nullptr);
@@ -368,6 +406,9 @@ bool startPcmFaceAnimation() {
     if (!PCM_MOUTH_ANIMATION || pcmFaceTaskHandle) return true;
     pcmFaceRunning = true;
     pcmFaceAmplitude = 0;
+    pcmFaceFrame = 0;
+    pcmFaceSamplePosition = 0;
+    pcmFaceEnvelopeSequence = 0;
     BaseType_t result = xTaskCreate(
         pcmFaceAnimationTask, "pcm_face", 4096, nullptr, 0,
         &pcmFaceTaskHandle);
@@ -1084,11 +1125,55 @@ void pcmDownloadTask(void *parameter) {
     vTaskDelete(nullptr);
 }
 
-uint8_t pcmAmplitude(const uint8_t *data, size_t bytes) {
-    if (!data || bytes < 4) return 0;
-    uint64_t total = 0;
-    size_t frames = bytes / 4;
-    for (size_t offset = 0; offset + 3 < bytes; offset += 4) {
+struct PcmAmplitudeTracker {
+    uint64_t windowTotal = 0;
+    uint16_t windowFrames = 0;
+    uint32_t samplePosition = 0;
+    float noiseFloor = PCM_FACE_INITIAL_NOISE_FLOOR;
+    float peak = PCM_FACE_INITIAL_PEAK;
+    float smoothed = 0.0f;
+};
+
+uint8_t normalizePcmAmplitude(uint32_t level, PcmAmplitudeTracker &tracker) {
+    float value = static_cast<float>(level);
+    if (value < tracker.noiseFloor) {
+        tracker.noiseFloor += (value - tracker.noiseFloor) *
+                               PCM_FACE_NOISE_FLOOR_FALL;
+    } else {
+        tracker.noiseFloor += (value - tracker.noiseFloor) *
+                               PCM_FACE_NOISE_FLOOR_RISE;
+    }
+    if (tracker.noiseFloor < PCM_FACE_MIN_NOISE_FLOOR) {
+        tracker.noiseFloor = PCM_FACE_MIN_NOISE_FLOOR;
+    }
+
+    tracker.peak = max(value, tracker.peak * PCM_FACE_PEAK_DECAY);
+    float span = max(1.0f, tracker.peak - tracker.noiseFloor);
+    float normalized = ((value - tracker.noiseFloor) * 255.0f) / span;
+    normalized = max(0.0f, min(255.0f, normalized * PCM_FACE_HEADROOM));
+    if (normalized < PCM_FACE_NOISE_GATE) normalized = 0.0f;
+
+    float smoothing = normalized >= tracker.smoothed
+        ? PCM_FACE_ATTACK : PCM_FACE_RELEASE;
+    tracker.smoothed += (normalized - tracker.smoothed) * smoothing;
+    return static_cast<uint8_t>(lroundf(max(0.0f, min(255.0f,
+                                                        tracker.smoothed))));
+}
+
+void publishPcmAmplitude(uint8_t amplitude, uint32_t samplePosition) {
+    // A sequence guard prevents the face task from pairing an amplitude with
+    // a sample position from a different 20 ms envelope window.
+    ++pcmFaceEnvelopeSequence;
+    pcmFaceAmplitude = amplitude;
+    pcmFaceSamplePosition = samplePosition;
+    ++pcmFaceEnvelopeSequence;
+}
+
+void pcmUpdateAmplitude(const uint8_t *data, size_t bytes,
+                        PcmAmplitudeTracker &tracker) {
+    if (!data) return;
+    size_t usable = bytes - (bytes % 4);
+    for (size_t offset = 0; offset < usable; offset += 4) {
         int32_t left = static_cast<int16_t>(
             static_cast<uint16_t>(data[offset]) |
             (static_cast<uint16_t>(data[offset + 1]) << 8));
@@ -1097,9 +1182,28 @@ uint8_t pcmAmplitude(const uint8_t *data, size_t bytes) {
             (static_cast<uint16_t>(data[offset + 3]) << 8));
         if (left < 0) left = -left;
         if (right < 0) right = -right;
-        total += static_cast<uint32_t>((left + right) / 2);
+        tracker.windowTotal += static_cast<uint32_t>((left + right) / 2);
+        ++tracker.windowFrames;
+        ++tracker.samplePosition;
+        if (tracker.windowFrames < PCM_FACE_WINDOW_FRAMES) continue;
+
+        uint32_t level = static_cast<uint32_t>(
+            tracker.windowTotal / tracker.windowFrames);
+        publishPcmAmplitude(normalizePcmAmplitude(level, tracker),
+                            tracker.samplePosition);
+        tracker.windowTotal = 0;
+        tracker.windowFrames = 0;
     }
-    return static_cast<uint8_t>(min<uint64_t>(255, total / max<size_t>(1, frames) / 128));
+}
+
+void flushPcmAmplitude(PcmAmplitudeTracker &tracker) {
+    if (tracker.windowFrames == 0) return;
+    uint32_t level = static_cast<uint32_t>(
+        tracker.windowTotal / tracker.windowFrames);
+    publishPcmAmplitude(normalizePcmAmplitude(level, tracker),
+                        tracker.samplePosition);
+    tracker.windowTotal = 0;
+    tracker.windowFrames = 0;
 }
 
 bool writeFileFully(File &file, const uint8_t *data, size_t length) {
@@ -1190,9 +1294,7 @@ bool playPcmStream(const String &id, size_t &playedBytes) {
         i2s_zero_dma_buffer(I2S_NUM_0);
     }
     unsigned long lastData = millis();
-    unsigned long nextMouthUpdate = millis();
-    uint8_t mouthFrame = 0;
-    uint8_t previousAmplitude = 0;
+    PcmAmplitudeTracker amplitudeTracker;
     while (!context.finished || context.buffered > 0) {
         size_t itemSize = 0;
         unsigned long receiveStarted = millis();
@@ -1216,39 +1318,67 @@ bool playPcmStream(const String &id, size_t &playedBytes) {
             }
             continue;
         }
-        size_t written = 0;
-        esp_err_t result = ESP_OK;
-        if (PCM_DIAGNOSTIC_USE_SDK_PLAYBACK) {
-            xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
-            bool writeOk = writeFileFully(diagnosticWav, item, itemSize);
-            xSemaphoreGive(xSPIlMutex);
-            written = writeOk ? itemSize : 0;
-            diagnosticBytes += written;
-        } else {
-            unsigned long i2sStarted = millis();
-            result = i2s_write(I2S_NUM_0, item, itemSize, &written,
-                               pdMS_TO_TICKS(2000));
-            unsigned long i2sWait = millis() - i2sStarted;
-            context.totalI2sWriteMs += i2sWait;
-            if (i2sWait > context.maxI2sWriteMs) {
-                context.maxI2sWriteMs = i2sWait;
+
+        bool itemOk = true;
+        size_t itemOffset = 0;
+        while (itemOffset < itemSize) {
+            size_t chunkSize = min(PCM_FACE_WINDOW_BYTES,
+                                   itemSize - itemOffset);
+            chunkSize -= chunkSize % 4;
+            if (chunkSize == 0) break;
+
+            size_t written = 0;
+            esp_err_t result = ESP_OK;
+            if (PCM_DIAGNOSTIC_USE_SDK_PLAYBACK) {
+                xSemaphoreTake(xSPIlMutex, portMAX_DELAY);
+                bool writeOk = writeFileFully(
+                    diagnosticWav, item + itemOffset, chunkSize);
+                xSemaphoreGive(xSPIlMutex);
+                written = writeOk ? chunkSize : 0;
+                diagnosticBytes += written;
+            } else {
+                unsigned long i2sStarted = millis();
+                result = i2s_write(I2S_NUM_0, item + itemOffset, chunkSize,
+                                   &written, pdMS_TO_TICKS(2000));
+                unsigned long i2sWait = millis() - i2sStarted;
+                context.totalI2sWriteMs += i2sWait;
+                if (i2sWait > context.maxI2sWriteMs) {
+                    context.maxI2sWriteMs = i2sWait;
+                }
+            }
+
+            if (written > 0) {
+                pcmUpdateAmplitude(item + itemOffset, written,
+                                   amplitudeTracker);
+            }
+            context.i2sWrites++;
+            context.i2sRequestedBytes += chunkSize;
+            context.i2sWrittenBytes += written;
+            if (written != chunkSize) context.i2sPartialWrites++;
+            if (!PCM_DIAGNOSTIC_USE_SDK_PLAYBACK &&
+                (result != ESP_OK || written != chunkSize)) {
+                context.failed = true;
+                itemOk = false;
+                Serial.printf("PCM stream I2S write failed err=%d wrote=%u/%u\n",
+                              (int)result, (unsigned)written,
+                              (unsigned)chunkSize);
+                break;
+            }
+            playedBytes += written;
+            itemOffset += written;
+            lastData = millis();
+            if (written != chunkSize) {
+                itemOk = false;
+                context.failed = true;
+                break;
             }
         }
-        uint8_t amplitude = pcmAmplitude(item, itemSize);
         vRingbufferReturnItem(context.ring, item);
         context.buffered -= itemSize;
         if (context.buffered < context.minBuffered) {
             context.minBuffered = context.buffered;
         }
-        context.i2sWrites++;
-        context.i2sRequestedBytes += itemSize;
-        context.i2sWrittenBytes += written;
-        if (written != itemSize) context.i2sPartialWrites++;
-        if (!PCM_DIAGNOSTIC_USE_SDK_PLAYBACK &&
-            (result != ESP_OK || written != itemSize)) {
-            context.failed = true;
-            Serial.printf("PCM stream I2S write failed err=%d wrote=%u/%u\n",
-                          (int)result, (unsigned)written, (unsigned)itemSize);
+        if (!itemOk) {
             while (!context.finished) {
                 size_t discardedSize = 0;
                 uint8_t *discarded = static_cast<uint8_t *>(xRingbufferReceiveUpTo(
@@ -1260,12 +1390,8 @@ bool playPcmStream(const String &id, size_t &playedBytes) {
             }
             break;
         }
-        playedBytes += written;
-        lastData = millis();
-        if (PCM_MOUTH_ANIMATION) {
-            pcmFaceAmplitude = amplitude;
-        }
     }
+    flushPcmAmplitude(amplitudeTracker);
     while (!context.finished) delay(10);
     stopPcmFaceAnimation();
     context.playbackFinishedMs = millis();
@@ -1314,7 +1440,7 @@ bool playPcmStream(const String &id, size_t &playedBytes) {
     context.ring = nullptr;
     context.ringStorage = nullptr;
     if (success) {
-        settleMouthAfterPlayback(mouthFrame);
+        settleMouthAfterPlayback(pcmFaceFrame);
         Serial.printf("PCM stream playback complete bytes=%u\n", (unsigned)playedBytes);
     } else {
         Serial.printf("PCM stream playback failed bytes=%u downloaded=%u\n",
