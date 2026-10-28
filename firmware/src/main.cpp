@@ -78,7 +78,9 @@ uint16_t audioEnvelopeCount = 0;
 uint16_t jobSegmentsReady = 0;
 uint16_t jobSegmentsTotal = 0;
 bool jobStreamComplete = false;
+bool jobPcmStreamInitialized = false;
 bool jobPcmStreamReady = false;
+bool jobPcmStreamClaimed = false;
 bool jobPcmStreamComplete = false;
 
 String statusText = "STARTING";
@@ -738,9 +740,13 @@ String pollJob(const String &id, uint16_t wantedSegment = 0,
                 jobSegmentsReady = doc["segments_ready"] | 0;
                 jobSegmentsTotal = doc["segments_total"] | 0;
                 jobStreamComplete = doc["stream_complete"] | false;
+                jobPcmStreamInitialized = doc["pcm_stream_initialized"] | false;
                 jobPcmStreamReady = doc["pcm_stream_ready"] | false;
+                jobPcmStreamClaimed = doc["pcm_stream_claimed"] | false;
                 jobPcmStreamComplete = doc["pcm_stream_complete"] | false;
-                if (allowPcmStream && jobPcmStreamReady && wantedSegment == 0) {
+                if (allowPcmStream && !jobPcmStreamClaimed &&
+                    jobPcmStreamReady && wantedSegment == 0) {
+                    face("thinking", "Preparing audio...", false, 0);
                     http.end();
                     return "pcm_streaming";
                 }
@@ -765,7 +771,15 @@ String pollJob(const String &id, uint16_t wantedSegment = 0,
                 // Once playback has started, keep the speaking face while we
                 // wait for the next streamed segment to become available.
                 if (wantedSegment == 0) {
-                    face("thinking", state + "...", false, 0);
+                    String thinkingCaption = "Thinking...";
+                    if (state == "transcribing") {
+                        thinkingCaption = "Transcribing...";
+                    } else if (jobPcmStreamInitialized && !jobPcmStreamReady) {
+                        thinkingCaption = "Preparing audio...";
+                    } else if (state == "streaming") {
+                        thinkingCaption = "Preparing audio...";
+                    }
+                    face("thinking", thinkingCaption, false, 0);
                 }
             } else {
                 Serial.printf("GET /jobs parse failed: %s bytes=%u\n",
@@ -1248,6 +1262,7 @@ bool playPcmStream(const String &id, size_t &playedBytes) {
         return false;
     }
 
+    face("thinking", "Preparing audio...", false, 0);
     unsigned long prefillStarted = millis();
     while (!context.finished && context.buffered < PCM_PREFILL_BYTES &&
            millis() - prefillStarted < 15000UL) {
@@ -1510,7 +1525,9 @@ bool voiceTurn(bool followup) {
     jobSegmentsReady = 0;
     jobSegmentsTotal = 0;
     jobStreamComplete = false;
+    jobPcmStreamInitialized = false;
     jobPcmStreamReady = false;
+    jobPcmStreamClaimed = false;
     jobPcmStreamComplete = false;
     String outcome = pollJob(job, 0);
     if (outcome == "interrupted") {

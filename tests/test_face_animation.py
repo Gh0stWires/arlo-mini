@@ -75,7 +75,10 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "clearFaceRegion(43, 93, 154, 78, fill);" not in source
     assert "clearEyeRegion(fill);" in source
     assert "clearFaceRegion(94, 188, 52, 43, fill);" in source
-    assert 'face("thinking", state + "...", false, 0);' in source
+    assert 'String thinkingCaption = "Thinking...";' in source
+    assert 'thinkingCaption = "Transcribing...";' in source
+    assert 'face("thinking", thinkingCaption, false, 0);' in source
+
     assert "uint8_t animationFrame = 0;" in source
     assert "faceGaze(state, animationFrame)" in source
     assert "thinkingMouthFrame(animationFrame)" in source

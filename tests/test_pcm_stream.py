@@ -52,6 +52,29 @@ def test_pcm_stream_replays_incremental_pcm_and_claims_once():
         directory.cleanup()
 
 
+def test_job_status_distinguishes_pcm_initialization_from_first_audio():
+    directory = tempfile.TemporaryDirectory(prefix="arlo-test-pcm-state-")
+    jid = "pcm-state-test"
+    server.jobs[jid] = server.Job(
+        id=jid,
+        directory=directory,
+        state="thinking",
+        pcm_stream_initialized=True,
+        pcm_stream_ready=False,
+    )
+    try:
+        response = client.get(f"/jobs/{jid}", headers=KEY)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["state"] == "thinking"
+        assert payload["pcm_stream_initialized"] is True
+        assert payload["pcm_stream_ready"] is False
+        assert payload["audio_format"] is not None
+    finally:
+        server.jobs.pop(jid, None)
+        directory.cleanup()
+
+
 def test_pcm_stream_requires_authentication():
     directory = tempfile.TemporaryDirectory(prefix="arlo-test-pcm-auth-")
     jid = "pcm-auth-test"

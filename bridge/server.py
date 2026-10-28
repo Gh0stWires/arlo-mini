@@ -197,6 +197,7 @@ class Job:
     segments_ready: int = 0
     segments_total: int = 0
     stream_complete: bool = False
+    pcm_stream_initialized: bool = False
     pcm_stream_ready: bool = False
     pcm_stream_complete: bool = False
     pcm_stream_error: str = ''
@@ -1033,13 +1034,13 @@ def run_job(jid: str, input_path: Path) -> None:
                         time.perf_counter() - tts_stream_started
                     ) * 1000
 
+                job.pcm_stream_initialized = True
                 live_session = NativePcmStreamSession(
                     Path(job.directory.name),
                     on_first_audio=mark_first_audio,
                     on_complete=mark_stream_complete,
                 )
                 job.pcm_stream_session = live_session
-                job.pcm_stream_ready = True
 
             def render_sentence(sentence: str) -> None:
                 if is_cancelled(job):
@@ -1187,6 +1188,7 @@ def job_status(jid: str, x_device_key: Optional[str] = Header(default=None)):
             'error': job.error, 'segments_ready': job.segments_ready,
             'segments_total': job.segments_total,
             'stream_complete': job.stream_complete,
+            'pcm_stream_initialized': job.pcm_stream_initialized,
             'pcm_stream_ready': job.pcm_stream_ready,
             'pcm_stream_complete': job.pcm_stream_complete,
             'pcm_stream_error': job.pcm_stream_error,
@@ -1194,7 +1196,7 @@ def job_status(jid: str, x_device_key: Optional[str] = Header(default=None)):
             'audio_format': {
                 'encoding': 's16le', 'sample_rate': 16000,
                 'channels': 2, 'bits_per_sample': 16,
-            } if job.pcm_stream_ready else None,
+            } if job.pcm_stream_initialized else None,
             'timings': {
                 key: round(value, 1) if isinstance(value, (int, float)) else value
                 for key, value in job.timings.items()
