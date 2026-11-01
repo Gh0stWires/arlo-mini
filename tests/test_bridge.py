@@ -164,3 +164,88 @@ def test_full_turn_and_audio_download(monkeypatch):
     assert audio.status_code == 200
     assert audio.content[:4] == b'RIFF'
     assert client.get(f'/jobs/{jid}/audio').status_code == 401
+
+
+def test_full_turn_exposes_sentence_audio_segments(monkeypatch):
+    monkeypatch.setattr(server, 'speech_to_text', lambda p: 'Tell me two things.')
+    def fake_hermes(text, on_sentence=None):
+        result = 'First sentence. Second sentence.'
+        if on_sentence:
+            for sentence in server.split_spoken_sentences(result):
+                on_sentence(sentence)
+        return result
+
+    monkeypatch.setattr(server, 'ask_hermes', fake_hermes)
+
+    def fake_tts(text, out, directory):
+        with wave.open(str(out), 'wb') as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b'\x00' * (16000 * 4))
+
+    monkeypatch.setattr(server, 'speech_to_wav', fake_tts)
+    response = client.post('/turn', headers=KEY, content=make_wav())
+    assert response.status_code == 202
+    jid = response.json()['id']
+    status = client.get(f'/jobs/{jid}', headers=KEY).json()
+    assert status['state'] == 'ready', status
+    assert status['segments_ready'] == 2
+    assert status['segments_total'] == 2
+    assert client.get(f'/jobs/{jid}/audio?segment=1', headers=KEY).status_code == 200
+
+
+def test_phrase_streaming_prefers_natural_clause_boundaries():
+    text = (
+        "Well now, sugar, that's a mighty fine question. "
+        "Give me just a minute, and we'll get it sorted out."
+    )
+
+    assert server.split_spoken_phrases(text) == [
+        "Well now, sugar, that's a mighty fine question.",
+        "Give me just a minute,",
+        "and we'll get it sorted out.",
+    ]
+
+
+def test_phrase_streaming_emits_incremental_units_without_dropping_text():
+    first, pending = server.consume_spoken_segments(
+        "Well now, sugar, that's a mighty fine question. Give me",
+        final=False,
+    )
+
+    assert first == ["Well now, sugar, that's a mighty fine question."]
+    assert pending == "Give me"
+
+    second, pending = server.consume_spoken_segments(
+        pending + " just a minute, and we'll get it sorted out.",
+        final=True,
+    )
+
+    assert second == [
+        "Give me just a minute,",
+        "and we'll get it sorted out.",
+    ]
+    assert pending == ""
+
+
+def test_full_turn_reports_pipeline_timings(monkeypatch):
+    monkeypatch.setattr(server, 'speech_to_text', lambda p: 'Give me a quick update.')
+    monkeypatch.setattr(
+        server,
+        'speech_to_wav',
+        lambda text, out, directory: out.write_bytes(b'RIFF-timed'),
+    )
+
+    response = client.post('/turn', headers=KEY, content=make_wav())
+    assert response.status_code == 202
+    jid = response.json()['id']
+    status = client.get(f'/jobs/{jid}', headers=KEY).json()
+    timings = status['timings']
+
+    assert status['state'] == 'ready'
+    assert timings['stt_ms'] >= 0
+    assert timings['hermes_ms'] >= 0
+    assert timings['first_audio_ready_ms'] >= 0
+    assert timings['first_phrase_tts_start_ms'] >= 0
+    assert timings['total_ms'] >= timings['first_audio_ready_ms']

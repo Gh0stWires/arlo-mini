@@ -1,0 +1,7 @@
+# Chatterbox Turbo/Nano environment for the voice bridge.
+# Install alongside bridge/requirements.txt in a Python 3.11 CUDA environment.
+# The upstream checkout is used because Nano support is newer than the PyPI
+# package currently installed in the validated Turbo environment.
+# After installing, replace the incomplete PyPI Perth wheel with the official
+# GitHub dependency shown in README.md.
+chatterbox-tts @ git+https://github.com/resemble-ai/chatterbox.git@master

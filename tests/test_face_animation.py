@@ -75,7 +75,10 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "clearFaceRegion(43, 93, 154, 78, fill);" not in source
     assert "clearEyeRegion(fill);" in source
     assert "clearFaceRegion(94, 188, 52, 43, fill);" in source
-    assert 'face("thinking", state + "...", false, 0);' in source
+    assert 'String thinkingCaption = "Thinking...";' in source
+    assert 'thinkingCaption = "Transcribing...";' in source
+    assert 'face("thinking", thinkingCaption, false, 0);' in source
+
     assert "uint8_t animationFrame = 0;" in source
     assert "faceGaze(state, animationFrame)" in source
     assert "thinkingMouthFrame(animationFrame)" in source
@@ -86,10 +89,30 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "mouthFrameFromAmplitude" in source
     assert "mouthFrameFromAudio" in source
     assert "AUDIO_ENVELOPE_BINS = 1024" in source
-    assert "nextMouthUpdate = now + 45" in source
+    assert "Playback duration wait complete" in source
     assert "state == \"speaking\"" in source
     assert "canvasCircle(120, 207, 8, OUTLINE" not in source
     assert "settleMouthAfterPlayback" in source
     assert "for (uint8_t minute = 0; minute < 60; ++minute)" in source
     assert "minute % 5 == 0" in source
     assert "const int starts[][2]" not in source
+    assert "PCM_FACE_UPDATE_MS = 45" in source
+    assert "PCM_FACE_WINDOW_FRAMES = 320" in source
+    assert "PCM_FACE_WINDOW_BYTES = PCM_FACE_WINDOW_FRAMES * 4" in source
+    assert "PCM_FACE_HEADROOM = 0.70f" in source
+    assert "PCM_FACE_NOISE_GATE = 8" in source
+    assert "pcmFaceSamplePosition" in source
+    assert "pcmFaceEnvelopeSequence" in source
+    assert "pcmUpdateAmplitude(item + itemOffset, written" in source
+    assert "settleMouthAfterPlayback(pcmFaceFrame);" in source
+    assert "uint8_t amplitude = pcmAmplitude(item, itemSize);" not in source
+    assert "vTaskDelay(pdMS_TO_TICKS(90));" not in source
+
+
+def test_wide_open_mouth_uses_rounded_rectangles():
+    source = (Path(__file__).resolve().parents[1] / "firmware" / "src" / "main.cpp").read_text()
+
+    assert "void drawRoundedRect(" in source
+    assert "drawRoundedRect(99, 195, 42, 25, 6, OUTLINE);" in source
+    assert "drawRoundedRect(105, 201, 30, 13, 4, MOUTH_WINE);" in source
+    assert "canvasRectangle(99, 195, 42, 25" not in source

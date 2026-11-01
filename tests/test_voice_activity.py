@@ -58,3 +58,36 @@ def test_voice_turn_no_longer_uses_fixed_duration_recorder():
     assert "recordUntilSpeechEnds()" in FIRMWARE_SOURCE
     assert "music.recordSaveToTFCard" not in FIRMWARE_SOURCE
     assert "VAD capture complete bytes=" in FIRMWARE_SOURCE
+
+
+def test_playback_completion_does_not_poll_the_sdk_audio_state():
+    playback_start = FIRMWARE_SOURCE.index("void playback()")
+    voice_turn_start = FIRMWARE_SOURCE.index("bool voiceTurn", playback_start)
+    playback_source = FIRMWARE_SOURCE[playback_start:voice_turn_start]
+
+    assert "k10.getPlayMusicState()" not in playback_source
+    assert "minimumPlaybackMs" in playback_source
+    assert "music.stopPlayAudio()" in playback_source
+    assert "nextMouthUpdate = now + 90" in playback_source
+    assert "peakAverage" in FIRMWARE_SOURCE
+    assert "(average * 255U) / peakAverage" in FIRMWARE_SOURCE
+
+
+def test_firmware_fetches_and_plays_sentence_segments_as_they_arrive():
+    assert "segments_ready" in FIRMWARE_SOURCE
+    assert "segments_total" in FIRMWARE_SOURCE
+    assert "stream_complete" in FIRMWARE_SOURCE
+    assert "?segment=" in FIRMWARE_SOURCE
+    assert "fetchAudio(job, segment)" in FIRMWARE_SOURCE
+
+
+def test_firmware_does_not_flash_to_thinking_between_audio_segments():
+    voice_turn_start = FIRMWARE_SOURCE.index("bool voiceTurn")
+    voice_turn_source = FIRMWARE_SOURCE[voice_turn_start:]
+    poll_start = FIRMWARE_SOURCE.index("String pollJob")
+    poll_source = FIRMWARE_SOURCE[poll_start:voice_turn_start]
+
+    assert 'if (segment == 0) {' in voice_turn_source
+    assert 'face("thinking", "Getting voice...");' in voice_turn_source
+    assert 'face("thinking", segment == 0 ? "Getting voice..." : "Next sentence...");' not in voice_turn_source
+    assert 'if (wantedSegment == 0) {' in poll_source
