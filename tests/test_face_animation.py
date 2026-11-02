@@ -74,7 +74,11 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "if (!dirty.any()) return;" in source
     assert "clearFaceRegion(43, 93, 154, 78, fill);" not in source
     assert "clearEyeRegion(fill);" in source
-    assert "clearFaceRegion(94, 188, 52, 43, fill);" in source
+    assert "drawRoundedRect(54, 101, 52, 74, 26, fill);" in source
+    assert "drawRoundedRect(134, 101, 52, 74, 26, fill);" in source
+    assert "clearEyeRegion(fill);\n            // Eye bounds overlap" in source
+    assert "drawClockTicks();\n            drawEyes(state, next.gaze" in source
+    assert "clearFaceRegion(94, 176, 52, 36, fill);" in source
     assert 'String thinkingCaption = "Thinking...";' in source
     assert 'thinkingCaption = "Transcribing...";' in source
     assert 'face("thinking", thinkingCaption, false, 0);' in source
@@ -93,9 +97,6 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "state == \"speaking\"" in source
     assert "canvasCircle(120, 207, 8, OUTLINE" not in source
     assert "settleMouthAfterPlayback" in source
-    assert "for (uint8_t minute = 0; minute < 60; ++minute)" in source
-    assert "minute % 5 == 0" in source
-    assert "const int starts[][2]" not in source
     assert "PCM_FACE_UPDATE_MS = 45" in source
     assert "PCM_FACE_WINDOW_FRAMES = 320" in source
     assert "PCM_FACE_WINDOW_BYTES = PCM_FACE_WINDOW_FRAMES * 4" in source
@@ -107,12 +108,23 @@ def test_firmware_keeps_full_clear_inside_full_renderer_only():
     assert "settleMouthAfterPlayback(pcmFaceFrame);" in source
     assert "uint8_t amplitude = pcmAmplitude(item, itemSize);" not in source
     assert "vTaskDelay(pdMS_TO_TICKS(90));" not in source
+    assert "for (uint8_t marker = 0; marker < MARKER_COUNT; ++marker)" in source
+    assert "MARKER_COUNT = 12" in source
+    assert "drawEyePill(x, 103, 48, 70, 23, OUTLINE);" in source
+    assert "drawEyePill(x + 5, 107, 38, 62, 18, EYE_CREAM);" in source
+    assert "drawEyePill(x + 3 + lookX, 124 + lookY, 42, 45, 20, OUTLINE);" in source
+    assert "void drawNose()" in source
+    assert "canvasCircle(120, 155, 8, OUTLINE" in source
+    assert "clearFaceRegion(94, 176, 52, 36, fill);" in source
+    assert "canvasLine(49, 98, 94, 105, OUTLINE);" not in source
+    assert "case 1: return 6;" not in source
+    assert "AUDIO_ENVELOPE_BINS" in source
 
 
 def test_wide_open_mouth_uses_rounded_rectangles():
     source = (Path(__file__).resolve().parents[1] / "firmware" / "src" / "main.cpp").read_text()
 
     assert "void drawRoundedRect(" in source
-    assert "drawRoundedRect(99, 195, 42, 25, 6, OUTLINE);" in source
-    assert "drawRoundedRect(105, 201, 30, 13, 4, MOUTH_WINE);" in source
-    assert "canvasRectangle(99, 195, 42, 25" not in source
+    assert "drawRoundedRect(102, 183, 36, 23, 9, OUTLINE);" in source
+    assert "drawRoundedRect(108, 189, 24, 11, 5, MOUTH_WINE);" in source
+    assert "canvasRectangle(102, 183, 36, 23" not in source

@@ -55,12 +55,12 @@ extern SemaphoreHandle_t xSPIlMutex;
 
 constexpr uint32_t INK = 0x07111B;
 constexpr uint32_t OUTLINE = 0x2A1723;
-constexpr uint32_t FACE_AMBER = 0xF6A63A;
-constexpr uint32_t FACE_GOLD = 0xFFD36B;
-constexpr uint32_t FACE_ERROR = 0xE9783D;
-constexpr uint32_t EYE_CREAM = 0xFFF1C7;
+constexpr uint32_t FACE_AMBER = 0xF6A027;
+constexpr uint32_t FACE_GOLD = 0xFFB82E;
+constexpr uint32_t FACE_ERROR = 0xD96A35;
+constexpr uint32_t EYE_CREAM = 0xFFF8E8;
 constexpr uint32_t MOUTH_WINE = 0x5B1E2A;
-constexpr uint32_t WHITE = 0xFFF8E8;
+constexpr uint32_t WHITE = 0xFFFFFF;
 constexpr uint16_t VAD_FRAME_MS = 20;
 constexpr uint16_t VAD_FRAME_BYTES = 1280;
 constexpr uint16_t VAD_PREROLL_FRAMES = 12;
@@ -194,84 +194,6 @@ void clearFaceRegion(int x, int y, int width, int height, uint32_t fill) {
     k10.canvas->canvasRectangle(x, y, width, height, fill, fill, true);
 }
 
-void drawClockTicks() {
-    constexpr float DEGREES_TO_RADIANS = 0.01745329252f;
-    constexpr int CENTER_X = 120;
-    constexpr int CENTER_Y = 158;
-    constexpr int MINUTE_OUTER_RADIUS = 85;
-    constexpr int MINUTE_INNER_RADIUS = 81;
-    constexpr int HOUR_OUTER_RADIUS = 87;
-    constexpr int HOUR_INNER_RADIUS = 75;
-
-    for (uint8_t minute = 0; minute < 60; ++minute) {
-        bool hourMarker = minute % 5 == 0;
-        float angle = (static_cast<float>(minute) * 6.0f - 90.0f) *
-                      DEGREES_TO_RADIANS;
-        int outerRadius = hourMarker ? HOUR_OUTER_RADIUS
-                                     : MINUTE_OUTER_RADIUS;
-        int innerRadius = hourMarker ? HOUR_INNER_RADIUS
-                                     : MINUTE_INNER_RADIUS;
-        int outerX = static_cast<int>(lroundf(
-            CENTER_X + cosf(angle) * outerRadius));
-        int outerY = static_cast<int>(lroundf(
-            CENTER_Y + sinf(angle) * outerRadius));
-        int innerX = static_cast<int>(lroundf(
-            CENTER_X + cosf(angle) * innerRadius));
-        int innerY = static_cast<int>(lroundf(
-            CENTER_Y + sinf(angle) * innerRadius));
-        k10.canvas->canvasLine(outerX, outerY, innerX, innerY, OUTLINE);
-    }
-}
-
-void drawStaticFace(const String &state) {
-    uint32_t fill = faceFillColor(state);
-    k10.canvas->canvasCircle(120, 158, 96, OUTLINE, OUTLINE, true);
-    k10.canvas->canvasCircle(120, 158, 89, fill, fill, true);
-    k10.canvas->canvasCircle(120, 158, 84, fill, fill, true);
-    drawClockTicks();
-}
-
-void clearEyeRegion(uint32_t fill) {
-    k10.canvas->canvasCircle(75, 130, 31, fill, fill, true);
-    k10.canvas->canvasCircle(165, 130, 31, fill, fill, true);
-}
-
-void drawEyes(const String &state, arloface::Gaze gaze, uint8_t blinkPhase) {
-    if (blinkPhase != 0) {
-        k10.canvas->canvasLine(49, 130, 101, 130, OUTLINE);
-        k10.canvas->canvasLine(139, 130, 191, 130, OUTLINE);
-        return;
-    }
-
-    int lookX = 0;
-    int lookY = 0;
-    if (gaze == arloface::Gaze::Left) lookX = -7;
-    if (gaze == arloface::Gaze::Right) lookX = 7;
-    if (gaze == arloface::Gaze::Up) lookY = -5;
-    int eyeRadius = state == "listening" ? 29 : 27;
-
-    for (int x : {75, 165}) {
-        k10.canvas->canvasCircle(x, 130, eyeRadius + 3, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(x, 130, eyeRadius, EYE_CREAM, EYE_CREAM, true);
-        k10.canvas->canvasCircle(x + lookX, 130 + lookY, 10, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(x + lookX - 3, 126 + lookY, 3, WHITE, WHITE, true);
-    }
-    if (state == "thinking") {
-        // Raised, slightly uneven brows read as concentration rather than anger.
-        k10.canvas->canvasLine(49, 101, 94, 96, OUTLINE);
-        k10.canvas->canvasLine(146, 96, 191, 101, OUTLINE);
-    } else {
-        k10.canvas->canvasLine(49, 101, 94, 97, OUTLINE);
-        k10.canvas->canvasLine(146, 97, 191, 101, OUTLINE);
-    }
-}
-
-void drawCaption(const String &caption) {
-    clearFaceRegion(10, 262, 220, 32, INK);
-    k10.canvas->canvasText(caption.substring(0, 23), 14, 275,
-                          WHITE, k10.canvas->eCNAndENFont16, 210, false);
-}
-
 void drawRoundedRect(int x, int y, int width, int height, int radius,
                      uint32_t fill) {
     k10.canvas->canvasRectangle(x + radius, y, width - radius * 2,
@@ -289,40 +211,122 @@ void drawRoundedRect(int x, int y, int width, int height, int radius,
                              fill, fill, true);
 }
 
+void drawClockTicks() {
+    constexpr float DEGREES_TO_RADIANS = 0.01745329252f;
+    constexpr int CENTER_X = 120;
+    constexpr int CENTER_Y = 158;
+    constexpr int MARKER_COUNT = 12;
+    constexpr int MARKER_OUTER_RADIUS = 86;
+    constexpr int MARKER_INNER_RADIUS = 76;
+
+    // Miss Minutes uses a handful of bold radial marks rather than a dense
+    // technical dial. Keeping the marks sparse leaves the face readable at
+    // the K10's small resolution and gives the eyes room to dominate.
+    for (uint8_t marker = 0; marker < MARKER_COUNT; ++marker) {
+        float angle = (static_cast<float>(marker) * 30.0f - 90.0f) *
+                      DEGREES_TO_RADIANS;
+        int outerX = static_cast<int>(lroundf(
+            CENTER_X + cosf(angle) * MARKER_OUTER_RADIUS));
+        int outerY = static_cast<int>(lroundf(
+            CENTER_Y + sinf(angle) * MARKER_OUTER_RADIUS));
+        int innerX = static_cast<int>(lroundf(
+            CENTER_X + cosf(angle) * MARKER_INNER_RADIUS));
+        int innerY = static_cast<int>(lroundf(
+            CENTER_Y + sinf(angle) * MARKER_INNER_RADIUS));
+        k10.canvas->canvasLine(outerX, outerY, innerX, innerY, OUTLINE);
+    }
+}
+
+void drawStaticFace(const String &state) {
+    uint32_t fill = faceFillColor(state);
+    // A broad dark rim and a thin inset of orange make the display read as a
+    // physical clock face instead of a flat orange circle.
+    k10.canvas->canvasCircle(120, 158, 97, OUTLINE, OUTLINE, true);
+    k10.canvas->canvasCircle(120, 158, 91, fill, fill, true);
+    k10.canvas->canvasCircle(120, 158, 87, fill, fill, true);
+    drawClockTicks();
+}
+
+void clearEyeRegion(uint32_t fill) {
+    // Use a rounded clear shape so the incremental repaint never cuts into
+    // the circular rim at the eye-region corners.
+    drawRoundedRect(54, 101, 52, 74, 26, fill);
+    drawRoundedRect(134, 101, 52, 74, 26, fill);
+}
+
+void drawEyePill(int x, int y, int width, int height, int radius,
+                uint32_t fill) {
+    drawRoundedRect(x, y, width, height, radius, fill);
+}
+
+void drawEyes(const String &state, arloface::Gaze gaze, uint8_t blinkPhase) {
+    if (blinkPhase != 0) {
+        k10.canvas->canvasLine(59, 138, 101, 138, OUTLINE);
+        k10.canvas->canvasLine(139, 138, 181, 138, OUTLINE);
+        return;
+    }
+
+    int lookX = 0;
+    int lookY = 0;
+    if (gaze == arloface::Gaze::Left) lookX = -4;
+    if (gaze == arloface::Gaze::Right) lookX = 4;
+    if (gaze == arloface::Gaze::Up) lookY = -3;
+
+    for (int x : {56, 136}) {
+        // Bring the eyes slightly inward toward the center of the face.
+        drawEyePill(x, 103, 48, 70, 23, OUTLINE);
+        drawEyePill(x + 5, 107, 38, 62, 18, EYE_CREAM);
+        drawEyePill(x + 3 + lookX, 124 + lookY, 42, 45, 20, OUTLINE);
+        // A small diagonal white glint gives the pupils the same cheerful,
+        // glossy focal point as the reference image.
+        k10.canvas->canvasLine(x + 9 + lookX, 132 + lookY,
+                               x + 18 + lookX, 144 + lookY, WHITE);
+        k10.canvas->canvasLine(x + 11 + lookX, 130 + lookY,
+                               x + 21 + lookX, 142 + lookY, WHITE);
+    }
+    (void)state;
+}
+
+void drawNose() {
+    // Lower the nose slightly while keeping it centered between the eyes.
+    k10.canvas->canvasCircle(120, 155, 8, OUTLINE, OUTLINE, true);
+}
+
+void drawCaption(const String &caption) {
+    clearFaceRegion(10, 262, 220, 32, INK);
+    k10.canvas->canvasText(caption.substring(0, 23), 14, 275,
+                          WHITE, k10.canvas->eCNAndENFont16, 210, false);
+}
+
 void drawMouth(const String &state, uint8_t mouthFrame) {
     (void)state;
-    if (mouthFrame == 0) {
-        k10.canvas->canvasLine(101, 207, 111, 211, OUTLINE);
-        k10.canvas->canvasLine(111, 211, 120, 212, OUTLINE);
-        k10.canvas->canvasLine(120, 212, 129, 211, OUTLINE);
-        k10.canvas->canvasLine(129, 211, 139, 207, OUTLINE);
+    if (mouthFrame == 0 || mouthFrame == 5) {
+        // Keep the smile close beneath the eyes, with the nose visibly between
+        // the eyes and this mouth.
+        k10.canvas->canvasLine(101, 189, 110, 193, OUTLINE);
+        k10.canvas->canvasLine(110, 193, 120, mouthFrame == 5 ? 194 : 195,
+                               OUTLINE);
+        k10.canvas->canvasLine(120, mouthFrame == 5 ? 194 : 195,
+                               130, 193, OUTLINE);
+        k10.canvas->canvasLine(130, 193, 139, mouthFrame == 5 ? 187 : 189,
+                               OUTLINE);
     } else if (mouthFrame == 1) {
-        // A shallow open smile bridges naturally from the resting smile.
-        k10.canvas->canvasLine(104, 207, 112, 210, OUTLINE);
-        k10.canvas->canvasLine(112, 210, 120, 211, OUTLINE);
-        k10.canvas->canvasLine(120, 211, 128, 210, OUTLINE);
-        k10.canvas->canvasLine(128, 210, 136, 207, OUTLINE);
-        k10.canvas->canvasLine(111, 209, 129, 209, MOUTH_WINE);
+        // A shallow opening keeps speech animation close to the smile.
+        k10.canvas->canvasLine(103, 189, 112, 193, OUTLINE);
+        k10.canvas->canvasLine(112, 193, 120, 194, OUTLINE);
+        k10.canvas->canvasLine(120, 194, 128, 193, OUTLINE);
+        k10.canvas->canvasLine(128, 193, 137, 189, OUTLINE);
+        k10.canvas->canvasLine(110, 192, 130, 192, MOUTH_WINE);
     } else if (mouthFrame == 2) {
-        // A small open jaw gives the audio motion a second, distinct step.
-        k10.canvas->canvasCircle(120, 208, 9, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(120, 208, 5, MOUTH_WINE, MOUTH_WINE, true);
-        k10.canvas->canvasLine(113, 214, 127, 214, FACE_GOLD);
+        drawRoundedRect(106, 186, 28, 17, 8, OUTLINE);
+        drawRoundedRect(111, 191, 18, 8, 4, MOUTH_WINE);
     } else if (mouthFrame == 3) {
-        drawRoundedRect(99, 195, 42, 25, 6, OUTLINE);
-        drawRoundedRect(105, 201, 30, 13, 4, MOUTH_WINE);
-        k10.canvas->canvasLine(108, 215, 132, 215, FACE_GOLD);
-    } else if (mouthFrame == 4) {
-        k10.canvas->canvasCircle(120, 207, 12, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(120, 207, 7, MOUTH_WINE, MOUTH_WINE, true);
-    } else if (mouthFrame == 5) {
-        // A small asymmetric curl for a concentrated, thinking expression.
-        k10.canvas->canvasLine(103, 210, 112, 207, OUTLINE);
-        k10.canvas->canvasLine(112, 207, 121, 211, OUTLINE);
-        k10.canvas->canvasLine(121, 211, 137, 205, OUTLINE);
+        drawRoundedRect(102, 183, 36, 23, 9, OUTLINE);
+        drawRoundedRect(108, 189, 24, 11, 5, MOUTH_WINE);
+        k10.canvas->canvasLine(111, 201, 129, 201, FACE_GOLD);
     } else {
-        k10.canvas->canvasCircle(120, 207, 12, OUTLINE, OUTLINE, true);
-        k10.canvas->canvasCircle(120, 207, 7, MOUTH_WINE, MOUTH_WINE, true);
+        k10.canvas->canvasCircle(120, 193, 10, OUTLINE, OUTLINE, true);
+        k10.canvas->canvasCircle(120, 193, 5, MOUTH_WINE, MOUTH_WINE, true);
     }
 }
 
@@ -332,6 +336,7 @@ void renderFullFace(const String &state, const String &caption,
     k10.canvas->canvasClear();
     drawStaticFace(state);
     drawEyes(state, model.gaze, model.blinkPhase);
+    drawNose();
     drawMouth(state, model.mouthFrame);
     k10.canvas->canvasText("ARLO MINI", 57, 29, fill,
                           k10.canvas->eCNAndENFont16, 100, false);
@@ -358,10 +363,13 @@ void face(const String &state, const String &caption, bool blink = false,
         uint32_t fill = faceFillColor(state);
         if (dirty.eyes) {
             clearEyeRegion(fill);
+            // Eye bounds overlap the 1, 2, 10, and 11 o'clock markers.
+            // Restore those static marks before painting the eyes again.
+            drawClockTicks();
             drawEyes(state, next.gaze, next.blinkPhase);
         }
         if (dirty.mouth) {
-            clearFaceRegion(94, 188, 52, 43, fill);
+            clearFaceRegion(94, 176, 52, 36, fill);
             drawMouth(state, next.mouthFrame);
         }
         if (dirty.caption) {
