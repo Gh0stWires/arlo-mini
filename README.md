@@ -139,7 +139,7 @@ TTS_BACKEND=chatterbox_cpp
 CHATTERBOX_CPP_BINARY=C:/path/to/chatterbox.cpp/build-cuda/Release/tts-cli.exe
 CHATTERBOX_CPP_MODEL=C:/path/to/chatterbox.cpp/models/chatterbox-t3-turbo-f16.gguf
 CHATTERBOX_CPP_S3GEN=C:/path/to/chatterbox.cpp/models/chatterbox-s3gen-f16.gguf
-CHATTERBOX_CPP_PROFILE=C:/path/to/chatterbox.cpp/models/miss-minutes-profile
+CHATTERBOX_CPP_PROFILE=C:/path/to/arlo-mini/voice/miss-minutes-profile
 CHATTERBOX_CPP_RUNTIME_PATHS=C:/path/to/chatterbox.cpp/build-cuda/bin/Release;C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.6/bin
 CHATTERBOX_CPP_THREADS=4
 CHATTERBOX_CPP_GPU_LAYERS=99
@@ -165,6 +165,12 @@ The normalized bytes are also retained as a complete WAV so the existing SD
 path remains available if no PCM bytes reached the speaker. The PCM mode is
 experimental and must be physically validated before replacing the Python
 Turbo default.
+
+See [docs/chatterbox-cpp-setup.md](docs/chatterbox-cpp-setup.md) for the
+native repository layout, Windows raw-PCM stdout requirement, build
+commands, ignored local assets, and physical validation checklist. Keep the
+native `chatterbox.cpp` checkout and its models outside Hermes scratch
+directories.
 
 For an experimental lower time-to-first-audio mode, set
 `CHATTERBOX_PHRASE_STREAMING=true`. The bridge then emits natural clause-sized
@@ -196,9 +202,20 @@ Expected: `{"ok":true,"name":"ARLO Mini bridge",...}`. Then run same request fro
 
 ## Test the backend without hardware
 
-```bash
-python -m pip install pytest httpx
+Install the test dependencies once with `python -m pip install pytest httpx`.
+The repository's offline tests must not inherit the active native PCM settings
+from `bridge/.env`. On Windows PowerShell, run them with the backend overridden:
+
+```powershell
+$env:TTS_BACKEND = 'auto'
+$env:CHATTERBOX_CPP_LIVE_STREAM = 'false'
 python -m pytest -q tests/
+```
+
+On a POSIX shell:
+
+```bash
+TTS_BACKEND=auto CHATTERBOX_CPP_LIVE_STREAM=false python -m pytest -q tests/
 ```
 
 The tests mock transcription and synthesis, verify authentication, reject invalid/oversized input, exercise the job queue and fetch generated WAV bytes. They also cover end phrases, friendly farewell generation, cancellation, cleanup retries, VAD state transitions, pre-roll, WAV finalization, and firmware integration markers. They do **not** replace physical speaker, microphone, or Wi-Fi validation.

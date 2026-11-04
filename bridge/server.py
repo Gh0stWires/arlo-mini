@@ -383,9 +383,9 @@ class NativePcmStreamSession:
         if not self.error and self.raw_path.exists():
             _write_pcm_wav(self.fallback_path, self.raw_path.read_bytes())
         self.chunks.put(None)
-        self._done.set()
         if self.on_complete:
             self.on_complete(self)
+        self._done.set()
 
     def write_sentence(self, sentence: str) -> None:
         if not sentence.strip():

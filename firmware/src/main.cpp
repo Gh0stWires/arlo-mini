@@ -1019,7 +1019,7 @@ constexpr size_t PCM_PREFILL_BYTES = 256 * 1024;
 constexpr uint32_t PCM_I2S_PLAYBACK_RATE = 16000;
 constexpr uint32_t PCM_I2S_IDLE_RATE = 16000;
 constexpr unsigned long PCM_STREAM_TIMEOUT_MS = 60000UL;
-// Optional one-shot isolation mode; production PCM uses direct I2S.
+// Direct live PCM sink for the experimental streaming path.
 constexpr bool PCM_DIAGNOSTIC_USE_SDK_PLAYBACK = false;
 
 struct PcmStreamContext {
@@ -1471,6 +1471,7 @@ bool playPcmStream(const String &id, size_t &playedBytes) {
     }
     return success;
 }
+
 void playback() {
     if (!SD.exists(OUTPUT_WAV)) return;
     unsigned long expectedMs = outputWavDurationMs();
